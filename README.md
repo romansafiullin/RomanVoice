@@ -60,7 +60,58 @@ set OPENAI_API_KEY=your-key
 OPENAI_API_KEY=your-key
 ```
 
+## Quick Launch (Windows)
+
+For everyday use, you can register `ow` and `openwhisper` as global commands so the app launches from any terminal in any directory — no need to `cd` into the repo or activate the venv first.
+
+### One-time install
+
+From the repo root, run:
+
+```
+install.cmd
+```
+
+This adds `scripts\` to your user PATH (via the registry, not `setx` — see note below). It's idempotent, so running it twice does nothing the second time. **Open a new terminal afterward** for the change to take effect.
+
+After install, both commands work from anywhere:
+
+```
+ow              # short alias
+openwhisper     # full name
+```
+
+The launcher invokes `venv\Scripts\pythonw.exe` directly, so the app always uses the project's venv regardless of which environment your shell has activated. Code changes are picked up live — no reinstall needed after `git pull`.
+
+### Uninstall
+
+```
+uninstall.cmd
+```
+
+Removes the PATH entry only. Your venv, code, and the `scripts/` folder are left untouched, so re-running `install.cmd` later will restore the commands.
+
+### Manual install (no scripts)
+
+If you can't or don't want to run the installer (e.g., corporate execution-policy restrictions), add the path yourself in PowerShell:
+
+```powershell
+$dir = "D:\path\to\whisper_local\scripts"   # <-- adjust to your clone location
+$current = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($current -split ";" -notcontains $dir) {
+    [Environment]::SetEnvironmentVariable("Path", "$current;$dir", "User")
+}
+```
+
+> **Why not `setx`?** `setx PATH ...` from a `.cmd` file silently truncates PATH at 1024 characters and can duplicate System PATH entries into User PATH. `install.cmd` shells out to PowerShell, which writes directly to `HKCU\Environment\Path` via `[Environment]::SetEnvironmentVariable` — no truncation, no leakage between User and System scopes.
+
+### Alternative: skip PATH editing
+
+If you'd rather not modify your PATH at all, drop a copy of [scripts/openwhisper.cmd](scripts/openwhisper.cmd) into `%LOCALAPPDATA%\Microsoft\WindowsApps\` (which is already on Windows PATH for every user). Caveat: this is a *copy*, so you'd need to refresh it whenever the launcher logic changes — which is rare, but worth knowing.
+
 ## Usage
+
+If you ran `install.cmd`, just type `ow` or `openwhisper` from any terminal. Otherwise:
 
 ```bash
 python app_qt.py
