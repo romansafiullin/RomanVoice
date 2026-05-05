@@ -267,6 +267,7 @@ class HistorySidebar(QWidget):
         self._current_width = self.COLLAPSED_WIDTH
         self._quick_record_lock_width: Optional[int] = None
         self._quick_record_locked = False
+        self._refresh_pending = True
 
         self._setup_ui()
         self._apply_style()
@@ -384,7 +385,8 @@ class HistorySidebar(QWidget):
             # Refresh content after expansion is complete to avoid glitches during animation
             self._cache_quick_record_lock_width()
             self._unlock_quick_record_layout()
-            self.refresh()
+            if self._refresh_pending:
+                self.refresh()
         else:
             self.setMinimumWidth(self.COLLAPSED_WIDTH)
             self.setMaximumWidth(self.COLLAPSED_WIDTH)
@@ -517,6 +519,11 @@ class HistorySidebar(QWidget):
 
     def refresh(self):
         """Refresh sidebar content."""
+        if not self._is_expanded:
+            self._refresh_pending = True
+            return
+
+        self._refresh_pending = False
         self._load_recordings()
         self._load_history()
 

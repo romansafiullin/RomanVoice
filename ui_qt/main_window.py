@@ -226,7 +226,7 @@ from ui_qt.widgets import (
     HeaderCard, Card, PrimaryButton, DangerButton,
     SuccessButton, WarningButton, ControlPanel, Button,
     HistorySidebar, HistoryEdgeTab, TranscriptionStatsWidget,
-    TabbedContentWidget, QuickRecordTab
+    TabbedContentWidget, QuickRecordTab, UploadFileTab
 )
 from services.history_manager import history_manager
 
@@ -244,7 +244,7 @@ class MainWindow(QMainWindow):
     about_requested = pyqtSignal()
     history_toggle_requested = pyqtSignal()
     retranscribe_requested = pyqtSignal(str)  # Emits audio file path
-    upload_audio_requested = pyqtSignal()  # Request to upload audio file
+    upload_file_requested = pyqtSignal(str)  # audio_path from upload tab Transcribe button
     tab_changed = pyqtSignal(int)  # Emitted when tab selection changes
 
     def __init__(self):
@@ -278,6 +278,11 @@ class MainWindow(QMainWindow):
 
         # Geometry persistence
         self._geometry_save_timer = None
+        self._tab_history_refresh_timer = QTimer(self)
+        self._tab_history_refresh_timer.setSingleShot(True)
+        self._tab_history_refresh_timer.timeout.connect(
+            self._refresh_history_sidebar_if_expanded
+        )
 
         # Callbacks (will be set by controller)
         self.on_show_copied_animation: Optional[Callable] = None
@@ -337,6 +342,9 @@ class MainWindow(QMainWindow):
 
         self.tabbed_content.add_tab(self.quick_record_tab, "Quick Record")
 
+        self.upload_file_tab = UploadFileTab()
+        self.tabbed_content.add_tab(self.upload_file_tab, "Upload File")
+
         # Sync the stack with the tab bar after all tabs are added
         # (fixes timing issue where tab bar index is restored before stack has widgets)
         self.tabbed_content.sync_stack_with_tab_bar()
@@ -348,6 +356,11 @@ class MainWindow(QMainWindow):
         self.quick_record_tab.record_toggled.connect(self._on_quick_record_toggled)
         self.quick_record_tab.record_canceled.connect(self._on_quick_record_canceled)
         self.quick_record_tab.model_changed.connect(self._on_model_changed)
+
+        # Connect Upload File tab signals
+        self.upload_file_tab.upload_requested.connect(self._on_upload_file_transcribe)
+        self.upload_file_tab.model_changed.connect(self._on_model_changed)
+        self.upload_file_tab.stats_widget.visibility_changed.connect(self._on_stats_visibility_changed)
 
         # Connect stats visibility change
         self.quick_record_tab.stats_widget.visibility_changed.connect(self._on_stats_visibility_changed)
@@ -408,9 +421,9 @@ class MainWindow(QMainWindow):
     def _load_saved_settings(self):
         """Load saved settings and apply to UI."""
         try:
-            # Load the saved model selection and apply to quick record tab
             saved_model = settings_manager.load_model_selection()
             self.quick_record_tab.set_model_selection(saved_model)
+            self.upload_file_tab.set_model_selection(saved_model)
             self.current_model = self.quick_record_tab.current_model
             logger.info(f"Loaded saved model selection: {saved_model}")
         except Exception as e:
@@ -421,10 +434,22 @@ class MainWindow(QMainWindow):
         """Handle tab selection change."""
         logger.debug(f"Tab changed to index {index}")
 
-        self.history_sidebar.refresh()
+        self._schedule_history_sidebar_refresh()
 
         # Emit signal for external listeners
         self.tab_changed.emit(index)
+
+    def _schedule_history_sidebar_refresh(self) -> None:
+        """Defer visible sidebar refreshes so tab clicks stay responsive."""
+        if not self.history_sidebar.is_expanded:
+            return
+
+        self._tab_history_refresh_timer.start(75)
+
+    def _refresh_history_sidebar_if_expanded(self) -> None:
+        """Refresh history only when the sidebar is actually visible."""
+        if self.history_sidebar.is_expanded:
+            self.history_sidebar.refresh()
 
     def _on_quick_record_toggled(self, is_recording: bool):
         """Handle record toggle from Quick Record tab."""
@@ -446,9 +471,23 @@ class MainWindow(QMainWindow):
         self.record_canceled.emit()
 
     def _on_model_changed(self, model_name: str):
-        """Handle model selection change."""
+        """Handle model selection change from either tab and keep both in sync."""
         self.current_model = model_name
+
+        # Sync the other tab's combo without re-emitting the signal
+        for tab in (self.quick_record_tab, self.upload_file_tab):
+            combo = tab.model_combo
+            if combo.currentText() != model_name:
+                combo.blockSignals(True)
+                combo.setCurrentText(model_name)
+                tab.current_model = model_name
+                combo.blockSignals(False)
+
         self.model_changed.emit(model_name)
+
+    def _on_upload_file_transcribe(self, audio_path: str):
+        """Handle Transcribe click from the Upload File tab."""
+        self.upload_file_requested.emit(audio_path)
 
     def _update_recording_state(self):
         """Update UI states based on recording status."""
@@ -556,9 +595,10 @@ class MainWindow(QMainWindow):
         self.hotkeys_requested.emit()
 
     def upload_audio_file(self):
-        """Request to upload an audio file for transcription."""
-        logger.info("Upload audio file requested")
-        self.upload_audio_requested.emit()
+        """Switch to the Upload File tab and open file browser."""
+        logger.info("Upload audio file requested via menu")
+        self.tabbed_content.set_current_index(TabbedContentWidget.TAB_UPLOAD_FILE)
+        self.upload_file_tab.open_file_browser()
 
     def switch_to_quick_record(self):
         """Switch to the Quick Record tab."""
@@ -686,6 +726,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         logger.info("Main window closing")
+        self.tabbed_content.flush_pending_tab_selection()
         # If force quit is set, close immediately
         if self._force_quit:
             logger.info("Force quit - closing application")

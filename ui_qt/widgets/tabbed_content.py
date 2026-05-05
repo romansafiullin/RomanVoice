@@ -7,7 +7,7 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTabBar, QStackedWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from services.settings import SettingsKey, settings_manager
@@ -23,6 +23,7 @@ class TabbedContentWidget(QWidget):
 
     # Tab indices
     TAB_QUICK_RECORD = 0
+    TAB_UPLOAD_FILE = 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,6 +31,11 @@ class TabbedContentWidget(QWidget):
         # State
         self._recording_active = False
         self._active_recording_tab = -1  # Which tab has active recording
+        self._last_saved_tab_index: Optional[int] = None
+        self._pending_tab_index: Optional[int] = None
+        self._tab_save_timer = QTimer(self)
+        self._tab_save_timer.setSingleShot(True)
+        self._tab_save_timer.timeout.connect(self._save_pending_tab_selection)
 
         self._setup_ui()
         self._apply_style()
@@ -50,6 +56,7 @@ class TabbedContentWidget(QWidget):
         self.tab_bar.setExpanding(False)  # Don't expand tabs to fill width
 
         self.tab_bar.addTab("Quick Record")
+        self.tab_bar.addTab("Upload File")
 
         # Center the tab bar
         tab_container = QWidget()
@@ -99,6 +106,7 @@ class TabbedContentWidget(QWidget):
             settings = settings_manager.load_all_settings()
             last_tab = settings.get(SettingsKey.LAST_TAB_INDEX, self.TAB_QUICK_RECORD)
             if 0 <= last_tab < self.tab_bar.count():
+                self._last_saved_tab_index = last_tab
                 self.tab_bar.setCurrentIndex(last_tab)
         except Exception as e:
             logger.warning(f"Failed to restore last tab: {e}")
@@ -107,14 +115,41 @@ class TabbedContentWidget(QWidget):
         """Handle tab selection change."""
         self.stack.setCurrentIndex(index)
 
-        # Save the selected tab
-        try:
-            settings_manager.save_setting(SettingsKey.LAST_TAB_INDEX, index)
-        except Exception as e:
-            logger.warning(f"Failed to save tab selection: {e}")
+        self._schedule_tab_selection_save(index)
 
         self.tab_changed.emit(index)
         logger.debug(f"Tab changed to index {index}")
+
+    def _schedule_tab_selection_save(self, index: int) -> None:
+        """Persist tab selection after the UI has had time to switch."""
+        if index == self._last_saved_tab_index:
+            self._pending_tab_index = None
+            if self._tab_save_timer.isActive():
+                self._tab_save_timer.stop()
+            return
+
+        self._pending_tab_index = index
+        self._tab_save_timer.start(250)
+
+    def _save_pending_tab_selection(self) -> None:
+        """Save the most recent tab selection outside the tab-click path."""
+        if self._pending_tab_index is None:
+            return
+
+        index = self._pending_tab_index
+        self._pending_tab_index = None
+
+        try:
+            settings_manager.save_setting(SettingsKey.LAST_TAB_INDEX, index)
+            self._last_saved_tab_index = index
+        except Exception as e:
+            logger.warning(f"Failed to save tab selection: {e}")
+
+    def flush_pending_tab_selection(self) -> None:
+        """Synchronously persist any queued tab selection."""
+        if self._tab_save_timer.isActive():
+            self._tab_save_timer.stop()
+        self._save_pending_tab_selection()
 
     def add_tab(self, widget: QWidget, title: str) -> int:
         """Add a widget to the stacked widget.

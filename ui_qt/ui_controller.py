@@ -6,7 +6,7 @@ Bridges between UI and application logic.
 import logging
 from typing import Callable, List, Optional
 from PyQt6.QtCore import QTimer, pyqtSignal, QObject
-from PyQt6.QtWidgets import QMessageBox, QFileDialog
+from PyQt6.QtWidgets import QMessageBox
 
 from config import config
 from ui_qt.overlay_state import OverlayState
@@ -15,9 +15,7 @@ from ui_qt.overlays import CaretPasteIndicator, StreamingTextOverlay, WaveformOv
 from ui_qt.system_tray import SystemTrayManager
 from ui_qt.dialogs.settings_dialog import SettingsDialog
 from ui_qt.dialogs.hotkey_dialog import HotkeyDialog
-from ui_qt.dialogs.upload_preview_dialog import UploadPreviewDialog
-from ui_qt.widgets import QuickRecordTab, TabbedContentWidget
-from services.audio_processor import audio_processor
+from ui_qt.widgets import QuickRecordTab, UploadFileTab, TabbedContentWidget
 from services.settings import SettingsKey
 
 logger = logging.getLogger(__name__)
@@ -50,6 +48,7 @@ class UIController(QObject):
         self.is_recording = False
         self.audio_levels: List[float] = [0.0] * 20
         self.streaming_flow_active = False
+        self._transcription_source_tab: int = TabbedContentWidget.TAB_QUICK_RECORD
 
         # Callbacks for external handlers
         self.on_record_start: Optional[Callable] = None
@@ -80,7 +79,7 @@ class UIController(QObject):
         self.main_window.hotkeys_requested.connect(self.open_hotkey_dialog)
         self.main_window.about_requested.connect(self.show_about_dialog)
         self.main_window.retranscribe_requested.connect(self._on_retranscribe_requested)
-        self.main_window.upload_audio_requested.connect(self.open_upload_audio_dialog)
+        self.main_window.upload_file_requested.connect(self._on_upload_file_transcribe)
 
         # Set up the copied animation callback
         self.main_window.on_show_copied_animation = self.show_copied_animation
@@ -157,13 +156,19 @@ class UIController(QObject):
             self.overlay.set_state(self.overlay.STATE_PROCESSING)
 
     def _display_transcript(self, text: str):
-        """Display the completed transcript in the main window."""
-        self.main_window.set_transcript(text)
+        """Display the completed transcript in the tab that started transcription."""
+        if self._transcription_source_tab == TabbedContentWidget.TAB_UPLOAD_FILE:
+            self.main_window.upload_file_tab.set_transcript(text)
+        else:
+            self.main_window.set_transcript(text)
         self.hide_overlay()
 
     def _apply_status_to_main_window(self, status: str):
-        """Forward a status string to the main window status label."""
-        self.main_window.set_status(status)
+        """Forward a status string to the active transcription tab."""
+        if self._transcription_source_tab == TabbedContentWidget.TAB_UPLOAD_FILE:
+            self.main_window.upload_file_tab.set_status(status)
+        else:
+            self.main_window.set_status(status)
 
     def _apply_audio_levels_to_overlay(self, levels: List[float]):
         """Forward audio level updates to the waveform overlay."""
@@ -172,6 +177,7 @@ class UIController(QObject):
     def start_recording(self):
         """Start recording."""
         self.is_recording = True
+        self._transcription_source_tab = TabbedContentWidget.TAB_QUICK_RECORD
         logger.info("Recording started")
 
         # Sync main window state (important for hotkey-triggered recordings)
@@ -236,20 +242,20 @@ class UIController(QObject):
         audio_duration: float,
         file_size: int
     ):
-        """Set the transcription statistics display.
-
-        Args:
-            transcription_time: Time taken to transcribe in seconds.
-            audio_duration: Duration of the audio in seconds.
-            file_size: Size of the audio file in bytes.
-        """
-        self.main_window.set_transcription_stats(
-            transcription_time, audio_duration, file_size
-        )
+        """Set the transcription statistics display on the active transcription tab."""
+        if self._transcription_source_tab == TabbedContentWidget.TAB_UPLOAD_FILE:
+            self.main_window.upload_file_tab.set_transcription_stats(
+                transcription_time, audio_duration, file_size
+            )
+        else:
+            self.main_window.set_transcription_stats(
+                transcription_time, audio_duration, file_size
+            )
 
     def clear_transcription_stats(self):
         """Clear and hide the transcription statistics display."""
         self.main_window.clear_transcription_stats()
+        self.main_window.upload_file_tab.clear_transcription_stats()
 
     def set_status(self, status: str):
         """Update only the human-readable status text."""
@@ -438,64 +444,10 @@ class UIController(QObject):
         dialog.on_hotkeys_save = on_hotkeys_save
         dialog.exec()
 
-    def open_upload_audio_dialog(self):
-        """Open file dialog to select an audio file for transcription."""
-        logger.info("Opening upload audio dialog")
-
-        # Define supported audio formats
-        audio_filters = "Audio Files (*.wav *.mp3 *.m4a *.ogg *.flac *.wma);;WAV Files (*.wav);;MP3 Files (*.mp3);;All Files (*.*)"
-
-        audio_path, _ = QFileDialog.getOpenFileName(
-            self.main_window,
-            "Select Audio File",
-            "",
-            audio_filters
-        )
-
-        if not audio_path:
-            logger.info("Audio file selection canceled")
-            return
-
-        logger.info(f"Selected audio file: {audio_path}")
-
-        # Analyze the file and show preview
-        try:
-            preview = audio_processor.preview_file(audio_path)
-
-            # Show preview dialog
-            dialog = UploadPreviewDialog(preview, self.main_window)
-            dialog.on_proceed = self._start_uploaded_audio_transcription
-            dialog.exec()
-
-        except FileNotFoundError as e:
-            logger.error(f"File not found: {e}")
-            QMessageBox.warning(
-                self.main_window,
-                "File Not Found",
-                f"The selected file could not be found:\n{audio_path}"
-            )
-        except ValueError as e:
-            logger.error(f"Invalid audio file: {e}")
-            QMessageBox.warning(
-                self.main_window,
-                "Invalid Audio File",
-                f"The selected file could not be read as audio.\n\nError: {e}"
-            )
-        except Exception as e:
-            logger.error(f"Error analyzing audio file: {e}")
-            QMessageBox.critical(
-                self.main_window,
-                "Error",
-                f"Failed to analyze audio file:\n{e}"
-            )
-
-    def _start_uploaded_audio_transcription(self, audio_path: str):
-        """Start uploaded-audio transcription after preview confirmation.
-
-        Args:
-            audio_path: Path to the audio file to transcribe.
-        """
-        logger.info(f"Processing uploaded audio: {audio_path}")
+    def _on_upload_file_transcribe(self, audio_path: str):
+        """Handle Transcribe from the Upload File tab."""
+        self._transcription_source_tab = TabbedContentWidget.TAB_UPLOAD_FILE
+        logger.info(f"Upload tab transcription started: {audio_path}")
         if self.on_upload_audio:
             self.on_upload_audio(audio_path)
 
@@ -506,6 +458,10 @@ class UIController(QObject):
             The QuickRecordTab instance
         """
         return self.main_window.quick_record_tab
+
+    def get_upload_file_tab(self) -> UploadFileTab:
+        """Get the Upload File tab widget."""
+        return self.main_window.upload_file_tab
 
     def switch_to_tab(self, index: int):
         """Switch to a specific tab.
@@ -518,6 +474,10 @@ class UIController(QObject):
     def switch_to_quick_record(self):
         """Switch to the Quick Record tab."""
         self.switch_to_tab(TabbedContentWidget.TAB_QUICK_RECORD)
+
+    def switch_to_upload_file(self):
+        """Switch to the Upload File tab."""
+        self.switch_to_tab(TabbedContentWidget.TAB_UPLOAD_FILE)
 
     def update_hotkey_display(self, hotkeys: dict):
         """

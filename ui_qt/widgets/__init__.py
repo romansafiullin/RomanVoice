@@ -26,6 +26,7 @@ from ui_qt.widgets.history_sidebar import (
 from ui_qt.widgets.stats_display import TranscriptionStatsWidget
 from ui_qt.widgets.tabbed_content import TabbedContentWidget
 from ui_qt.widgets.quick_record_tab import QuickRecordTab
+from ui_qt.widgets.upload_file_tab import UploadFileTab
 
 __all__ = [
     "Button",
@@ -47,4 +48,5 @@ __all__ = [
     "TranscriptionStatsWidget",
     "TabbedContentWidget",
     "QuickRecordTab",
+    "UploadFileTab",
 ]
