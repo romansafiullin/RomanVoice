@@ -8,6 +8,7 @@ import signal
 from pathlib import Path
 
 from config import config
+from ui_qt.startup_profiler import StartupProfiler
 
 _CRASH_LOG_FILE = None
 _QT_MESSAGE_HANDLER_INSTALLED = False
@@ -90,14 +91,20 @@ def _install_qt_message_handler() -> None:
     logging.info("Qt message handler installed")
 
 
-def get_runtime_components():
-    """Load the runtime classes used during startup."""
-    from services.application_controller import ApplicationController
+def get_early_runtime_components():
+    """Load only the runtime classes needed for the first visual."""
     from ui_qt.app import QtApplication
     from ui_qt.loading_screen import LoadingScreen
+
+    return QtApplication, LoadingScreen
+
+
+def get_late_runtime_components():
+    """Load heavier runtime classes after the loading screen is visible."""
+    from services.application_controller import ApplicationController
     from ui_qt.ui_controller import UIController
 
-    return QtApplication, LoadingScreen, UIController, ApplicationController
+    return UIController, ApplicationController
 
 
 def process_qt_events() -> None:
@@ -108,41 +115,60 @@ def process_qt_events() -> None:
 
 
 def main() -> int:
-    """Main application entry point"""
+    """Main application entry point."""
+    profiler = StartupProfiler()
+    profiler.mark("main_entered")
+    summary_logged = False
+
     setup_logging()
+    profiler.mark("logging_ready")
     logging.info("=" * 60)
     logging.info("Starting OpenWhisper")
     logging.info("=" * 60)
 
-    QtApplication, LoadingScreen, UIController, ApplicationController = (
-        get_runtime_components()
-    )
+    profiler.mark("early_imports_started")
+    QtApplication, LoadingScreen = get_early_runtime_components()
+    profiler.mark("early_imports_finished")
 
     qt_app = QtApplication()
+    profiler.mark("qt_app_created")
     loading_screen = None
     ui_controller = None
     app_controller = None
 
     try:
         loading_screen = LoadingScreen()
+        profiler.mark("loading_screen_constructed")
         loading_screen.show()
+        profiler.mark("loading_screen_shown")
 
         loading_screen.update_status("Initializing components...")
-        loading_screen.update_progress("Loading theme...")
+        loading_screen.update_progress("Preparing startup...")
         loading_screen.repaint()
         process_qt_events()
+        profiler.mark("first_visual_flushed")
+
+        loading_screen.update_status("Loading application...")
+        loading_screen.update_progress("Loading runtime components...")
+        process_qt_events()
+
+        profiler.mark("late_imports_started")
+        UIController, ApplicationController = get_late_runtime_components()
+        profiler.mark("late_imports_finished")
 
         loading_screen.update_status("Creating interface...")
         loading_screen.update_progress("Setting up windows...")
         process_qt_events()
 
         ui_controller = UIController()
+        profiler.mark("ui_controller_created")
 
         loading_screen.update_status("Initializing audio system...")
         loading_screen.update_progress("Loading transcription models...")
         process_qt_events()
 
         app_controller = ApplicationController(ui_controller)
+        profiler.mark("application_controller_created")
 
         local_backend = app_controller.transcription_backends.get("local_whisper")
         if local_backend and hasattr(local_backend, "device_info"):
@@ -155,14 +181,20 @@ def main() -> int:
         loading_screen = None
 
         ui_controller.show_main_window()
+        profiler.mark("main_window_shown")
 
         if local_backend and hasattr(local_backend, "device_info"):
             ui_controller.set_device_info(local_backend.device_info)
 
+        profiler.log_summary()
+        summary_logged = True
         logging.info("Application initialization complete")
         logging.info("Starting event loop")
         return qt_app.run(ui_controller.main_window)
     except Exception:
+        if not summary_logged:
+            profiler.log_summary()
+            summary_logged = True
         logging.exception("Application startup failed")
         raise
     finally:

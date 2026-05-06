@@ -7,14 +7,17 @@ from ui_qt import bootstrap
 
 
 class _FakeLoadingScreen:
-    def __init__(self):
+    def __init__(self, order=None):
         self.destroyed = False
         self.statuses = []
         self.progress = []
         self.shown = False
+        self.order = order
 
     def show(self):
         self.shown = True
+        if self.order is not None:
+            self.order.append("loading_screen_shown")
 
     def update_status(self, status):
         self.statuses.append(status)
@@ -91,17 +94,27 @@ class TestBootstrap(unittest.TestCase):
     ):
         qt_app = _FakeQtApplication()
         ui_controller = _FakeUIController()
-        loading_screen = _FakeLoadingScreen()
+        order = []
+        loading_screen = _FakeLoadingScreen(order)
+
+        def get_early_runtime_components():
+            order.append("early_imports")
+            return lambda: qt_app, lambda: loading_screen
+
+        def get_late_runtime_components():
+            order.append("late_imports")
+            return lambda: ui_controller, _FakeApplicationController
+
+        _mock_process_events.side_effect = lambda: order.append("process_events")
 
         with patch.object(
             bootstrap,
-            "get_runtime_components",
-            return_value=(
-                lambda: qt_app,
-                lambda: loading_screen,
-                lambda: ui_controller,
-                _FakeApplicationController,
-            ),
+            "get_early_runtime_components",
+            side_effect=get_early_runtime_components,
+        ), patch.object(
+            bootstrap,
+            "get_late_runtime_components",
+            side_effect=get_late_runtime_components,
         ):
             result = bootstrap.main()
 
@@ -111,6 +124,8 @@ class TestBootstrap(unittest.TestCase):
         self.assertEqual(ui_controller.device_info, "cuda")
         self.assertEqual(len(_FakeApplicationController.instances), 1)
         self.assertTrue(_FakeApplicationController.instances[0].cleaned_up)
+        self.assertLess(order.index("loading_screen_shown"), order.index("late_imports"))
+        self.assertLess(order.index("process_events"), order.index("late_imports"))
 
     @patch.object(bootstrap, "process_qt_events")
     @patch.object(bootstrap, "setup_logging")
@@ -124,13 +139,12 @@ class TestBootstrap(unittest.TestCase):
 
         with patch.object(
             bootstrap,
-            "get_runtime_components",
-            return_value=(
-                lambda: qt_app,
-                lambda: loading_screen,
-                lambda: ui_controller,
-                _FakeApplicationController,
-            ),
+            "get_early_runtime_components",
+            return_value=(lambda: qt_app, lambda: loading_screen),
+        ), patch.object(
+            bootstrap,
+            "get_late_runtime_components",
+            return_value=(lambda: ui_controller, _FakeApplicationController),
         ):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 bootstrap.main()
