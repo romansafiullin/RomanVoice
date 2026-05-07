@@ -62,7 +62,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-For cloud transcription, set your API key:
+OPTIONAL: For cloud transcription, set your API key:
 ```bash
 # Windows
 set OPENAI_API_KEY=your-key
