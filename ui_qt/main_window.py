@@ -254,9 +254,15 @@ class MainWindow(QMainWindow):
 
         # Frameless window with custom title bar
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setMinimumSize(500, 600)
-        self.setMaximumWidth(1280)  # Increased to accommodate sidebar
-        self.resize(604, 700)  # Initial size: base_width + edge_tab_width (580 + 24)
+        self.setMinimumSize(
+            config.MAIN_WINDOW_MIN_WIDTH,
+            config.MAIN_WINDOW_MIN_HEIGHT,
+        )
+        self.setMaximumWidth(config.MAIN_WINDOW_MAX_WIDTH)
+        self.resize(
+            config.MAIN_WINDOW_DEFAULT_WIDTH,
+            config.MAIN_WINDOW_DEFAULT_HEIGHT,
+        )
 
         # State
         self.is_recording = False
@@ -265,9 +271,9 @@ class MainWindow(QMainWindow):
         self._initial_show_complete = False  # Track if initial show has completed
 
         # Window sizing for sidebar toggle
-        self._base_width = 580  # Optimal width without sidebar
-        self._sidebar_width = 380  # HistorySidebar.EXPANDED_WIDTH
-        self._edge_tab_width = 24  # HistoryEdgeTab width
+        self._collapsed_width = config.MAIN_WINDOW_DEFAULT_WIDTH
+        self._sidebar_width = config.MAIN_WINDOW_HISTORY_SIDEBAR_WIDTH
+        self._geometry_format = "collapsed_content_v1"
 
         # Edge resize support for frameless window
         self._resize_margin = 8  # Pixels from edge to trigger resize
@@ -575,7 +581,10 @@ class MainWindow(QMainWindow):
             new_height = current_height + stats_height
         else:
             # Shrink window when stats hidden
-            new_height = max(600, current_height - stats_height)  # Don't go below min height
+            new_height = max(
+                config.MAIN_WINDOW_MIN_HEIGHT,
+                current_height - stats_height,
+            )
 
         # Animate the height change
         self._animate_resize(self.width(), new_height)
@@ -647,11 +656,19 @@ class MainWindow(QMainWindow):
         current_height = self.height()
 
         if expanded:
+            self._collapsed_width = max(self.minimumWidth(), self.width())
             # Expand window to fit sidebar
-            new_width = self._base_width + self._sidebar_width + self._edge_tab_width
+            new_width = min(
+                self.maximumWidth(),
+                self._collapsed_width + self._sidebar_width,
+            )
         else:
+            self._collapsed_width = max(
+                self.minimumWidth(),
+                self.width() - self._sidebar_width,
+            )
             # Collapse window back to base size
-            new_width = self._base_width + self._edge_tab_width
+            new_width = self._collapsed_width
 
         # Animate the resize for smooth transition
         self._animate_resize(new_width, current_height)
@@ -915,10 +932,25 @@ class MainWindow(QMainWindow):
             return  # Don't save maximized/minimized state
 
         geo = self.geometry()
+        width = geo.width()
+        history_expanded = (
+            hasattr(self, "history_sidebar") and self.history_sidebar.is_expanded
+        )
+        if history_expanded:
+            width = max(self.minimumWidth(), width - self._sidebar_width)
+        self._collapsed_width = width
+
         try:
             settings_manager.save_setting(
                 SettingsKey.WINDOW_GEOMETRY,
-                {'x': geo.x(), 'y': geo.y(), 'width': geo.width(), 'height': geo.height()},
+                {
+                    'x': geo.x(),
+                    'y': geo.y(),
+                    'width': width,
+                    'height': geo.height(),
+                    'format': self._geometry_format,
+                    'history_expanded': history_expanded,
+                },
             )
         except Exception as e:
             logger.warning(f"Failed to save window geometry: {e}")
@@ -938,12 +970,43 @@ class MainWindow(QMainWindow):
                     # Check if saved position is at least partially on screen
                     saved_rect = QRect(geo['x'], geo['y'], geo['width'], geo['height'])
                     if screen_geo.intersects(saved_rect):
+                        raw_width = geo['width']
+                        migrated_expanded_width = False
+                        legacy_expanded_width = (
+                            config.MAIN_WINDOW_DEFAULT_WIDTH
+                            + config.MAIN_WINDOW_HISTORY_SIDEBAR_WIDTH
+                            - config.MAIN_WINDOW_HISTORY_EDGE_TAB_WIDTH
+                        )
+                        if (
+                            geo.get('format') != self._geometry_format
+                            and raw_width >= legacy_expanded_width
+                        ):
+                            raw_width -= config.MAIN_WINDOW_HISTORY_SIDEBAR_WIDTH
+                            migrated_expanded_width = True
+
                         # Ensure size constraints - both min and max for width and height
-                        width = max(self.minimumWidth(), min(geo['width'], self.maximumWidth()))
-                        # Cap height at screen height to prevent excessively tall windows
+                        width = max(self.minimumWidth(), min(raw_width, self.maximumWidth()))
+                        # Cap narrow/collapsed restores to the default height so stale
+                        # geometry cannot make the app reopen as an overly tall strip.
                         max_height = screen_geo.height()
+                        if width <= config.MAIN_WINDOW_DEFAULT_WIDTH or migrated_expanded_width:
+                            width = config.MAIN_WINDOW_DEFAULT_WIDTH
+                            max_height = min(
+                                max_height,
+                                config.MAIN_WINDOW_COLLAPSED_RESTORE_MAX_HEIGHT,
+                            )
                         height = max(self.minimumHeight(), min(geo['height'], max_height))
-                        self.setGeometry(geo['x'], geo['y'], width, height)
+                        self._collapsed_width = width
+                        restore_width = width
+                        if (
+                            hasattr(self, "history_sidebar")
+                            and self.history_sidebar.is_expanded
+                        ):
+                            restore_width = min(
+                                self.maximumWidth(),
+                                width + self._sidebar_width,
+                            )
+                        self.setGeometry(geo['x'], geo['y'], restore_width, height)
                         logger.info(f"Restored window geometry: {geo}")
                         return
 

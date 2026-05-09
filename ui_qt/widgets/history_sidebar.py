@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, pyqtProperty
 from PyQt6.QtGui import QFont
 
+from config import config
 from services.history_manager import HistoryEntry, RecordingInfo, history_manager
 
 logger = logging.getLogger(__name__)
@@ -259,7 +260,7 @@ class HistorySidebar(QWidget):
     retranscribe_requested = pyqtSignal(str)  # Emits audio file path
 
     COLLAPSED_WIDTH = 0
-    EXPANDED_WIDTH = 380
+    EXPANDED_WIDTH = config.MAIN_WINDOW_HISTORY_SIDEBAR_WIDTH
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -641,7 +642,7 @@ class HistoryEdgeTab(QPushButton):
         super().__init__(parent)
         self.setObjectName("historyEdgeTab")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedWidth(24)
+        self.setFixedWidth(config.MAIN_WINDOW_HISTORY_EDGE_TAB_WIDTH)
         self.setMinimumHeight(80)
         self._is_expanded = False
         self._update_icon()

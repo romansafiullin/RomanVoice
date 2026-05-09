@@ -32,16 +32,7 @@ _patch_subprocess_for_windows()
 
 from ui_qt.bootstrap import main
 
-__all__ = ["ApplicationController", "main"]
-
-
-def __getattr__(name: str):
-    """Lazily expose compatibility exports without slowing app launch."""
-    if name == "ApplicationController":
-        from services.application_controller import ApplicationController
-
-        return ApplicationController
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = ["main"]
 
 
 if __name__ == "__main__":

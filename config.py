@@ -56,11 +56,15 @@ class AppConfig:
     # Whisper model choices for faster-whisper
     WHISPER_MODEL_CHOICES: List[str] = None
 
-    # UI settings
-    MAIN_WINDOW_SIZE: str = "300x200"
-    LOADING_WINDOW_SIZE: str = "300x300"
-    HOTKEY_DIALOG_SIZE: str = "400x300"
-    OVERLAY_SIZE: str = "200x30"
+    # Main window sizing
+    MAIN_WINDOW_MIN_WIDTH: int = 500
+    MAIN_WINDOW_MIN_HEIGHT: int = 600
+    MAIN_WINDOW_DEFAULT_WIDTH: int = 605
+    MAIN_WINDOW_DEFAULT_HEIGHT: int = 840
+    MAIN_WINDOW_HISTORY_SIDEBAR_WIDTH: int = 380
+    MAIN_WINDOW_HISTORY_EDGE_TAB_WIDTH: int = 24
+    MAIN_WINDOW_MAX_WIDTH: int = 1280
+    MAIN_WINDOW_COLLAPSED_RESTORE_MAX_HEIGHT: int = 840
 
     # Waveform overlay settings
     WAVEFORM_OVERLAY_WIDTH: int = 300
