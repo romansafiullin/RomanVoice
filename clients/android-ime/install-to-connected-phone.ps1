@@ -57,13 +57,34 @@ $Prefs = @"
 </map>
 "@
 
+function Install-DebugApk {
+    $installOutput = & $Adb install -r $Apk 2>&1
+    $installOutput | Write-Output
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+
+    if (($installOutput -join "`n") -notmatch "INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
+        throw "adb install failed"
+    }
+
+    Write-Output "Existing RomanVoice IME uses a different debug signature; reinstalling cleanly."
+    & $Adb uninstall app.romanvoice.ime | Write-Output
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb uninstall failed after signature mismatch"
+    }
+
+    $retryOutput = & $Adb install -r $Apk 2>&1
+    $retryOutput | Write-Output
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb install failed after signature-mismatch reinstall"
+    }
+}
+
 $TempPrefs = Join-Path $env:TEMP "romanvoice_ime.xml"
 Set-Content -Path $TempPrefs -Value $Prefs -Encoding UTF8
 
-& $Adb install -r $Apk
-if ($LASTEXITCODE -ne 0) {
-    throw "adb install failed"
-}
+Install-DebugApk
 
 & $Adb shell pm grant app.romanvoice.ime android.permission.RECORD_AUDIO | Out-Null
 & $Adb push $TempPrefs /data/local/tmp/romanvoice_ime.xml | Out-Null

@@ -8,9 +8,10 @@ WebSocket, writes live partials into the active Android text field with
 
 ## Service URL
 
-RomanVoice still binds to `127.0.0.1:8799` by default. A phone cannot reach that
-loopback address. For phone use, run RomanVoice with a host that is reachable
-from the phone, ideally over Tailscale:
+RomanVoice config still defaults to `127.0.0.1:8799`, which a phone cannot
+reach. The normal background launchers set `ROMANVOICE_SERVICE_HOST=0.0.0.0`
+unless you override it, so the Pixel can reach the desktop service on the
+local/private network. To persist that behavior for other launch methods, set:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("ROMANVOICE_SERVICE_HOST", "0.0.0.0", "User")
@@ -60,6 +61,11 @@ For command-line install after USB debugging is enabled:
 The install script reads `%APPDATA%\RomanVoice\service_token.txt`, installs the
 debug APK, grants microphone permission, and preloads the IME settings with this
 PC's LAN URL. It also asks Android to switch the current keyboard to RomanVoice.
+The debug APK is signed with a durable local keystore at
+`%APPDATA%\RomanVoice\android-ime-debug.keystore` so later local rebuilds can
+update the installed app without a clean uninstall. If a mismatched older debug
+build is already installed, the install script uninstalls and reinstalls the
+RomanVoice IME package before reloading settings.
 
 For phone-side debugging while the Pixel is connected with USB debugging:
 

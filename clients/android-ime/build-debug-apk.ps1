@@ -1,5 +1,6 @@
 param(
-    [string]$AndroidSdkRoot = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' })
+    [string]$AndroidSdkRoot = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }),
+    [string]$DebugKeystore = $(Join-Path $env:APPDATA 'RomanVoice\android-ime-debug.keystore')
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,13 @@ foreach ($Path in @($Aapt, $Aapt2, $D8, $Zipalign, $ApkSigner, $PlatformJar)) {
     }
 }
 
+$Keystore = $DebugKeystore
+$PreviousBuildKeystore = Join-Path $BuildRoot "debug.keystore"
+if (-not (Test-Path $Keystore) -and (Test-Path $PreviousBuildKeystore)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Keystore) | Out-Null
+    Copy-Item -LiteralPath $PreviousBuildKeystore -Destination $Keystore
+}
+
 Remove-Item -Recurse -Force -LiteralPath $BuildRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path `
     (Join-Path $BuildRoot "compiled-res"), `
@@ -48,7 +56,6 @@ $DexRoot = Join-Path $BuildRoot "dex"
 $ClassesJar = Join-Path $BuildRoot "classes.jar"
 $AlignedApk = Join-Path $BuildRoot "romanvoice-ime-aligned.apk"
 $SignedApk = Join-Path $ProjectRoot "dist\romanvoice-ime-debug.apk"
-$Keystore = Join-Path $BuildRoot "debug.keystore"
 
 Invoke-Checked $Aapt2 @("compile", "--dir", (Join-Path $AppRoot "src\main\res"), "-o", $CompiledRes)
 Invoke-Checked $Aapt2 @(
@@ -102,17 +109,20 @@ finally {
 
 Invoke-Checked $Zipalign @("-f", "4", $UnsignedApk, $AlignedApk)
 
-Invoke-Checked "keytool" @(
-    "-genkeypair",
-    "-keystore", $Keystore,
-    "-storepass", "android",
-    "-keypass", "android",
-    "-alias", "androiddebugkey",
-    "-keyalg", "RSA",
-    "-keysize", "2048",
-    "-validity", "10000",
-    "-dname", "CN=Android Debug,O=Android,C=US"
-) | Out-Null
+if (-not (Test-Path $Keystore)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Keystore) | Out-Null
+    Invoke-Checked "keytool" @(
+        "-genkeypair",
+        "-keystore", $Keystore,
+        "-storepass", "android",
+        "-keypass", "android",
+        "-alias", "androiddebugkey",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=Android Debug,O=Android,C=US"
+    ) | Out-Null
+}
 
 Invoke-Checked $ApkSigner @(
     "sign",
