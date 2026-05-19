@@ -36,6 +36,7 @@ if ($running.Count -gt 0) {
 
 $env:ROMANVOICE_START_HIDDEN = '1'
 $env:ROMANVOICE_ENABLE_GLOBAL_HOTKEYS = '1'
+$env:ROMANVOICE_SERVICE_HOST = if ($env:ROMANVOICE_SERVICE_HOST) { $env:ROMANVOICE_SERVICE_HOST } else { '0.0.0.0' }
 Remove-Item Env:\ROMANVOICE_FORCE_SHOW -ErrorAction SilentlyContinue
 
 $venvPythonw = Join-Path $repoRoot '.venv\Scripts\pythonw.exe'

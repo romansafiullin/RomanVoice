@@ -40,10 +40,12 @@ product or architecture direction.
   - `%APPDATA%\RomanVoice\service_token.txt`
   - `%LOCALAPPDATA%\RomanVoice\recordings`
   - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
-- The tray/background app owns the local dictation service on
-  `127.0.0.1:8799` by default. Keep the service authenticated with a bearer
-  token and in-process with the tray app unless Roman approves a different
-  ownership model.
+- The tray/background app owns the local dictation service. Config defaults to
+  `127.0.0.1:8799`, but the background launcher sets
+  `ROMANVOICE_SERVICE_HOST=0.0.0.0` so Roman's Pixel can reach the service over
+  the local/private network. Keep the service authenticated with a bearer token
+  and in-process with the tray app unless Roman approves a different ownership
+  model.
 - The service exposes `POST /v1/transcribe` for batch audio and
   `GET /v1/transcribe/stream` for authenticated WebSocket streaming. Streaming
   clients send PCM16 mono chunks and receive replacement partials plus a final

@@ -59,7 +59,14 @@ For command-line install after USB debugging is enabled:
 
 The install script reads `%APPDATA%\RomanVoice\service_token.txt`, installs the
 debug APK, grants microphone permission, and preloads the IME settings with this
-PC's LAN URL.
+PC's LAN URL. It also asks Android to switch the current keyboard to RomanVoice.
+
+For phone-side debugging while the Pixel is connected with USB debugging:
+
+```powershell
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+& $adb logcat -s RomanVoiceIme
+```
 
 ## Protocol
 

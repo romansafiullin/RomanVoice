@@ -9,6 +9,7 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -24,6 +25,7 @@ import java.net.URI;
 import java.net.URL;
 
 public class RomanVoiceImeService extends InputMethodService {
+    private static final String TAG = "RomanVoiceIme";
     private static final int SAMPLE_RATE = 16000;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -124,6 +126,7 @@ public class RomanVoiceImeService extends InputMethodService {
 
         new Thread(() -> {
             try {
+                Log.i(TAG, "Connecting to RomanVoice stream: " + streamUrl);
                 RomanVoiceStreamClient streamClient = new RomanVoiceStreamClient(
                         streamUrl,
                         token,
@@ -139,6 +142,7 @@ public class RomanVoiceImeService extends InputMethodService {
                     setStatus("Listening");
                 });
             } catch (Exception exception) {
+                Log.w(TAG, "RomanVoice stream connection failed", exception);
                 cleanupClient();
                 mainHandler.post(() -> {
                     micButton.setText("Mic");
@@ -177,6 +181,7 @@ public class RomanVoiceImeService extends InputMethodService {
                     try {
                         client.sendAudio(buffer, read);
                     } catch (IOException exception) {
+                        Log.w(TAG, "Failed to send audio chunk", exception);
                         mainHandler.post(() -> handleStreamError(shortError(exception)));
                         break;
                     }
@@ -277,6 +282,7 @@ public class RomanVoiceImeService extends InputMethodService {
             String message;
             try {
                 String healthUrl = streamUrlToHealthUrl(RomanVoicePreferences.streamUrl(this));
+                Log.i(TAG, "Checking RomanVoice health: " + healthUrl);
                 HttpURLConnection connection = (HttpURLConnection) new URL(healthUrl).openConnection();
                 connection.setConnectTimeout(1500);
                 connection.setReadTimeout(1500);
@@ -285,6 +291,7 @@ public class RomanVoiceImeService extends InputMethodService {
                 message = code == 200 ? "Ready" : "RomanVoice offline";
                 connection.disconnect();
             } catch (Exception exception) {
+                Log.w(TAG, "RomanVoice health check failed", exception);
                 message = "RomanVoice offline";
             }
             String finalMessage = message;
@@ -360,26 +367,31 @@ public class RomanVoiceImeService extends InputMethodService {
     private final class StreamListener implements RomanVoiceStreamClient.Listener {
         @Override
         public void onReady() {
+            Log.i(TAG, "RomanVoice stream ready");
             mainHandler.post(() -> setStatus("Connected"));
         }
 
         @Override
         public void onStarted() {
+            Log.i(TAG, "RomanVoice stream started");
             mainHandler.post(() -> setStatus("Listening"));
         }
 
         @Override
         public void onPartial(String text) {
+            Log.d(TAG, "RomanVoice partial length=" + (text == null ? 0 : text.length()));
             mainHandler.post(() -> handlePartial(text));
         }
 
         @Override
         public void onFinal(String text) {
+            Log.i(TAG, "RomanVoice final length=" + (text == null ? 0 : text.length()));
             mainHandler.post(() -> handleFinal(text));
         }
 
         @Override
         public void onError(String message) {
+            Log.w(TAG, "RomanVoice stream error: " + message);
             mainHandler.post(() -> handleStreamError(message));
         }
     }

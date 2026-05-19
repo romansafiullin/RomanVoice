@@ -72,8 +72,9 @@ if ($LASTEXITCODE -ne 0) {
 & $Adb shell run-as app.romanvoice.ime chmod 600 shared_prefs/romanvoice_ime.xml | Out-Null
 & $Adb shell am force-stop app.romanvoice.ime | Out-Null
 & $Adb shell ime enable app.romanvoice.ime/.RomanVoiceImeService | Out-Null
+& $Adb shell ime set app.romanvoice.ime/.RomanVoiceImeService | Out-Null
 & $Adb shell am start -n app.romanvoice.ime/.SettingsActivity | Out-Null
 
 Write-Output "Installed RomanVoice IME."
 Write-Output "Stream URL: $StreamUrl"
-Write-Output "If Android did not switch keyboards automatically, open keyboard settings and select RomanVoice."
+Write-Output "RomanVoice was requested as the current keyboard. If Android blocks that, open keyboard settings and select RomanVoice."

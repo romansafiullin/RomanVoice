@@ -48,10 +48,12 @@ Runtime data is stored under app-data paths:
 - `%LOCALAPPDATA%\RomanVoice\recordings`
 - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
 
-RomanVoice also starts a loopback-only dictation service from the same
-tray/background process. It is intended for Roman PA v2 and future trusted local
-clients, so the loaded Whisper model stays owned by one process. The default
-service URL is `http://127.0.0.1:8799`, and `/v1/transcribe` requires
+RomanVoice also starts a dictation service from the same tray/background
+process. It is intended for Roman PA v2 and trusted clients such as the Pixel
+IME, so the loaded Whisper model stays owned by one process. The config default
+is loopback-only at `http://127.0.0.1:8799`; the background launcher sets
+`ROMANVOICE_SERVICE_HOST=0.0.0.0` so the Pixel can reach it on the local
+network. `/v1/transcribe` and streaming requests require
 `Authorization: Bearer <token>`. The token is read from
 `ROMANVOICE_SERVICE_TOKEN` when set, otherwise RomanVoice creates and reuses
 `%APPDATA%\RomanVoice\service_token.txt`.
