@@ -52,8 +52,8 @@ product or architecture direction.
 - Text insertion is a core product behavior, not a preview-only feature.
   Streaming partials should reconcile into the focused text field, and final
   completion should reconcile or insert the final transcript.
-- Preserve final clipboard copy. The expected outcome after stop is both focused
-  field insertion and clipboard availability.
+- Keep clipboard copy available as an opt-in setting, but do not make it active
+  by default. The normal stop-time outcome is focused-field insertion.
 - Use Windows `SendInput` with `KEYEVENTF_UNICODE` as the primary typing path.
   Clipboard paste is a fallback for long text, failed Unicode insertion, or an
   explicit clipboard mode.
@@ -149,4 +149,3 @@ what remains manual.
 - Commit docs-only changes separately from runtime behavior changes when it keeps
   history easier to review.
 - Leave generated app data, logs, recordings, and local config out of git.
-

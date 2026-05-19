@@ -182,7 +182,7 @@ class AppConfig:
 
     # Text injection settings
     DEFAULT_AUTO_PASTE: bool = True
-    DEFAULT_COPY_CLIPBOARD: bool = True
+    DEFAULT_COPY_CLIPBOARD: bool = False
     TEXT_INJECTION_MODE: str = "unicode"  # "unicode" or "clipboard"
     TEXT_INJECTION_LONG_TEXT_THRESHOLD: int = 5000
     TEXT_INJECTION_KEY_DELAY_MS: int = 0

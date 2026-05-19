@@ -47,12 +47,12 @@ Runtime data is stored under app-data paths:
 - `%LOCALAPPDATA%\RomanVoice\recordings`
 - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
 
-Text insertion defaults to Windows `SendInput` Unicode typing, and final
-transcripts are also copied to the clipboard by default. Clipboard paste is only
-a fallback for long text, failed Unicode insertion, or when explicitly selected
-in settings. Global hotkeys may not fire into elevated/UAC windows unless the
-app is also run as administrator, and full-screen exclusive games may ignore
-synthesized Unicode input.
+Text insertion defaults to Windows `SendInput` Unicode typing. Clipboard copy is
+available as an opt-in setting, and clipboard paste is only a fallback for long
+text, failed Unicode insertion, or when explicitly selected in settings. Global
+hotkeys may not fire into elevated/UAC windows unless the app is also run as
+administrator, and full-screen exclusive games may ignore synthesized Unicode
+input.
 
 Default hotkeys:
 

@@ -607,13 +607,13 @@ class TestApplicationController(unittest.TestCase):
             ("", "streaming fallback", 0),
         )
 
-    def test_transcription_complete_copies_clipboard_by_default(self):
+    def test_transcription_complete_does_not_copy_clipboard_by_default(self):
         self.settings.all_settings.pop("copy_clipboard")
         controller = self._create_controller()
 
-        controller._on_transcription_complete("default clipboard copy")
+        controller._on_transcription_complete("default active-field insert")
 
-        self.assertEqual(self.pyperclip.copied[-1], "default clipboard copy")
+        self.assertEqual(self.pyperclip.copied, [])
 
     def test_transcription_complete_injects_final_text_when_live_type_has_no_prior_text(self):
         controller = self._create_controller()
