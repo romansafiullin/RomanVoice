@@ -85,6 +85,26 @@ class HistoryManager:
         Returns:
             The created HistoryEntry.
         """
+        from services.settings import SettingsKey, settings_manager
+
+        settings = settings_manager.load_all_settings()
+        history_enabled = settings.get(
+            SettingsKey.HISTORY_ENABLED, config.HISTORY_ENABLED
+        )
+
+        # Create the entry object even when persistence is disabled so callers can
+        # keep using the same return contract without writing plaintext history.
+        if not history_enabled:
+            logger.info("History disabled; transcription not persisted")
+            return HistoryEntry.create(
+                text=text,
+                model=model,
+                audio_file=None,
+                transcription_time=transcription_time,
+                audio_duration=audio_duration,
+                file_size=file_size
+            )
+
         saved_audio_path = None
 
         # Save the audio recording if provided
@@ -112,6 +132,10 @@ class HistoryManager:
             audio_duration=entry.audio_duration,
             file_size=entry.file_size
         )
+        retention_limit = settings.get(
+            SettingsKey.HISTORY_RETENTION_LIMIT, config.MAX_HISTORY_ENTRIES
+        )
+        db.trim_history_entries(int(retention_limit))
 
         logger.info(f"Added history entry: {entry.id[:8]}...")
         return entry

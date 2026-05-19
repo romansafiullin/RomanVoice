@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import List, Optional
 
 from sqlalchemy import create_engine, event, func, inspect, text
@@ -27,9 +28,13 @@ class DatabaseManager:
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or getattr(config, 'DATABASE_FILE', 'openwhisper.db')
+        db_parent = os.path.dirname(self.db_path)
+        if db_parent:
+            os.makedirs(db_parent, exist_ok=True)
+        sqlite_path = Path(self.db_path).as_posix()
 
         self.engine = create_engine(
-            f"sqlite:///{self.db_path}",
+            f"sqlite:///{sqlite_path}",
             connect_args={"check_same_thread": False, "timeout": 30},
             pool_pre_ping=True,
         )
@@ -242,6 +247,26 @@ class DatabaseManager:
     def clear_history(self) -> None:
         with self.get_session() as session:
             session.query(TranscriptionHistory).delete()
+
+    def trim_history_entries(self, max_entries: int) -> None:
+        """Keep only the newest max_entries history rows."""
+        if max_entries <= 0:
+            self.clear_history()
+            return
+
+        with self.get_session() as session:
+            old_ids = (
+                session.query(TranscriptionHistory.id)
+                .order_by(TranscriptionHistory.timestamp.desc())
+                .offset(max_entries)
+                .all()
+            )
+            ids_to_delete = [row[0] for row in old_ids]
+            if ids_to_delete:
+                session.query(TranscriptionHistory).filter(
+                    TranscriptionHistory.id.in_(ids_to_delete)
+                ).delete(synchronize_session=False)
+                logger.info("Trimmed %d old history entries", len(ids_to_delete))
 
     def update_history_audio_file(self, audio_filename: str) -> None:
         with self.get_session() as session:

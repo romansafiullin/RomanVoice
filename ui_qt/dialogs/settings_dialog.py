@@ -7,7 +7,7 @@ from typing import Optional, Callable
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
     QWidget, QLabel, QComboBox, QCheckBox, QSpinBox,
-    QSlider, QFrame, QScrollArea
+    QSlider, QFrame, QScrollArea, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -365,7 +365,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(compute_label)
 
         self.whisper_compute_combo = QComboBox()
-        self.whisper_compute_combo.addItems(["auto", "float16", "float32", "int8"])
+        self.whisper_compute_combo.addItems(["float16", "int8_float16", "float32", "int8", "auto"])
         self.whisper_compute_combo.setMinimumHeight(36)
         layout.addWidget(self.whisper_compute_combo)
 
@@ -373,6 +373,125 @@ class SettingsDialog(QDialog):
         compute_info = QLabel("Changes require restarting the whisper engine")
         compute_info.setStyleSheet("color: #808090; font-size: 10px; font-style: italic;")
         layout.addWidget(compute_info)
+
+        # Text injection section
+        layout.addSpacing(16)
+        separator_injection = QFrame()
+        separator_injection.setFrameShape(QFrame.Shape.HLine)
+        separator_injection.setStyleSheet("background-color: #404060;")
+        layout.addWidget(separator_injection)
+
+        layout.addSpacing(12)
+        injection_title = QLabel("Text Injection")
+        injection_title.setStyleSheet("color: #a0a0c0; font-weight: bold;")
+        layout.addWidget(injection_title)
+
+        injection_mode_label = QLabel("Mode:")
+        injection_mode_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(injection_mode_label)
+
+        self.injection_mode_combo = QComboBox()
+        self.injection_mode_combo.addItems(["unicode", "clipboard"])
+        self.injection_mode_combo.setMinimumHeight(36)
+        layout.addWidget(self.injection_mode_combo)
+
+        injection_delay_label = QLabel("Unicode inter-key delay (ms):")
+        injection_delay_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(injection_delay_label)
+
+        self.injection_delay_spinbox = QSpinBox()
+        self.injection_delay_spinbox.setMinimum(0)
+        self.injection_delay_spinbox.setMaximum(5)
+        self.injection_delay_spinbox.setValue(config.TEXT_INJECTION_KEY_DELAY_MS)
+        self.injection_delay_spinbox.setMinimumHeight(36)
+        layout.addWidget(self.injection_delay_spinbox)
+
+        long_text_label = QLabel("Clipboard fallback threshold (characters):")
+        long_text_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(long_text_label)
+
+        self.long_text_threshold_spinbox = QSpinBox()
+        self.long_text_threshold_spinbox.setMinimum(500)
+        self.long_text_threshold_spinbox.setMaximum(50000)
+        self.long_text_threshold_spinbox.setSingleStep(500)
+        self.long_text_threshold_spinbox.setValue(config.TEXT_INJECTION_LONG_TEXT_THRESHOLD)
+        self.long_text_threshold_spinbox.setMinimumHeight(36)
+        layout.addWidget(self.long_text_threshold_spinbox)
+
+        # History section
+        layout.addSpacing(16)
+        separator_history = QFrame()
+        separator_history.setFrameShape(QFrame.Shape.HLine)
+        separator_history.setStyleSheet("background-color: #404060;")
+        layout.addWidget(separator_history)
+
+        layout.addSpacing(12)
+        history_title = QLabel("Local History")
+        history_title.setStyleSheet("color: #a0a0c0; font-weight: bold;")
+        layout.addWidget(history_title)
+
+        self.history_enabled_check = QCheckBox("Keep local plaintext history")
+        self.history_enabled_check.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(self.history_enabled_check)
+
+        history_limit_label = QLabel("History retention limit:")
+        history_limit_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(history_limit_label)
+
+        self.history_limit_spinbox = QSpinBox()
+        self.history_limit_spinbox.setMinimum(0)
+        self.history_limit_spinbox.setMaximum(100000)
+        self.history_limit_spinbox.setSingleStep(100)
+        self.history_limit_spinbox.setValue(config.MAX_HISTORY_ENTRIES)
+        self.history_limit_spinbox.setMinimumHeight(36)
+        layout.addWidget(self.history_limit_spinbox)
+
+        # Local polish section
+        layout.addSpacing(16)
+        separator_polish = QFrame()
+        separator_polish.setFrameShape(QFrame.Shape.HLine)
+        separator_polish.setStyleSheet("background-color: #404060;")
+        layout.addWidget(separator_polish)
+
+        layout.addSpacing(12)
+        polish_title = QLabel("Local Polish")
+        polish_title.setStyleSheet("color: #a0a0c0; font-weight: bold;")
+        layout.addWidget(polish_title)
+
+        self.polish_enabled_check = QCheckBox("Polish longer dictation with Ollama")
+        self.polish_enabled_check.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(self.polish_enabled_check)
+
+        polish_model_label = QLabel("Ollama model:")
+        polish_model_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(polish_model_label)
+
+        self.polish_model_edit = QLineEdit()
+        self.polish_model_edit.setMinimumHeight(36)
+        layout.addWidget(self.polish_model_edit)
+
+        polish_threshold_label = QLabel("Minimum words before polish:")
+        polish_threshold_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(polish_threshold_label)
+
+        self.polish_word_threshold_spinbox = QSpinBox()
+        self.polish_word_threshold_spinbox.setMinimum(1)
+        self.polish_word_threshold_spinbox.setMaximum(500)
+        self.polish_word_threshold_spinbox.setValue(config.POLISH_WORD_THRESHOLD)
+        self.polish_word_threshold_spinbox.setMinimumHeight(36)
+        layout.addWidget(self.polish_word_threshold_spinbox)
+
+        polish_timeout_label = QLabel("Polish timeout (ms):")
+        polish_timeout_label.setStyleSheet("color: #e0e0ff;")
+        layout.addWidget(polish_timeout_label)
+
+        self.polish_timeout_spinbox = QSpinBox()
+        self.polish_timeout_spinbox.setMinimum(100)
+        self.polish_timeout_spinbox.setMaximum(10000)
+        self.polish_timeout_spinbox.setSingleStep(100)
+        self.polish_timeout_spinbox.setValue(config.POLISH_TIMEOUT_MS)
+        self.polish_timeout_spinbox.setMinimumHeight(36)
+        layout.addWidget(self.polish_timeout_spinbox)
 
         # Streaming Preview Model section
         layout.addSpacing(16)
@@ -478,7 +597,7 @@ class SettingsDialog(QDialog):
 
             # Load checkboxes
             self.auto_paste_check.setChecked(settings.get(SettingsKey.AUTO_PASTE, True))
-            self.copy_clipboard_check.setChecked(settings.get(SettingsKey.COPY_CLIPBOARD, True))
+            self.copy_clipboard_check.setChecked(settings.get(SettingsKey.COPY_CLIPBOARD, False))
             self.minimize_tray_check.setChecked(settings.get(SettingsKey.MINIMIZE_TRAY, True))
 
             # Load streaming settings
@@ -495,7 +614,7 @@ class SettingsDialog(QDialog):
             # Load whisper engine settings
             whisper_model = settings.get(SettingsKey.WHISPER_MODEL, config.DEFAULT_WHISPER_MODEL)
             whisper_device = settings.get(SettingsKey.WHISPER_DEVICE, 'auto')
-            whisper_compute = settings.get(SettingsKey.WHISPER_COMPUTE_TYPE, 'auto')
+            whisper_compute = settings.get(SettingsKey.WHISPER_COMPUTE_TYPE, config.FASTER_WHISPER_COMPUTE_TYPE)
 
             model_index = self.whisper_model_combo.findText(whisper_model)
             if model_index >= 0:
@@ -508,6 +627,51 @@ class SettingsDialog(QDialog):
             compute_index = self.whisper_compute_combo.findText(whisper_compute)
             if compute_index >= 0:
                 self.whisper_compute_combo.setCurrentIndex(compute_index)
+
+            injection_mode = settings.get(
+                SettingsKey.TEXT_INJECTION_MODE, config.TEXT_INJECTION_MODE
+            )
+            injection_index = self.injection_mode_combo.findText(injection_mode)
+            if injection_index >= 0:
+                self.injection_mode_combo.setCurrentIndex(injection_index)
+            self.injection_delay_spinbox.setValue(
+                settings.get(
+                    SettingsKey.TEXT_INJECTION_KEY_DELAY_MS,
+                    config.TEXT_INJECTION_KEY_DELAY_MS,
+                )
+            )
+            self.long_text_threshold_spinbox.setValue(
+                settings.get(
+                    SettingsKey.TEXT_INJECTION_LONG_TEXT_THRESHOLD,
+                    config.TEXT_INJECTION_LONG_TEXT_THRESHOLD,
+                )
+            )
+
+            self.history_enabled_check.setChecked(
+                settings.get(SettingsKey.HISTORY_ENABLED, config.HISTORY_ENABLED)
+            )
+            self.history_limit_spinbox.setValue(
+                settings.get(
+                    SettingsKey.HISTORY_RETENTION_LIMIT,
+                    config.MAX_HISTORY_ENTRIES,
+                )
+            )
+
+            self.polish_enabled_check.setChecked(
+                settings.get(SettingsKey.POLISH_ENABLED, config.POLISH_ENABLED)
+            )
+            self.polish_model_edit.setText(
+                settings.get(SettingsKey.POLISH_MODEL, config.POLISH_MODEL)
+            )
+            self.polish_word_threshold_spinbox.setValue(
+                settings.get(
+                    SettingsKey.POLISH_WORD_THRESHOLD,
+                    config.POLISH_WORD_THRESHOLD,
+                )
+            )
+            self.polish_timeout_spinbox.setValue(
+                settings.get(SettingsKey.POLISH_TIMEOUT_MS, config.POLISH_TIMEOUT_MS)
+            )
 
             # Load audio input device
             saved_device_id = settings.get(SettingsKey.AUDIO_INPUT_DEVICE)
@@ -523,7 +687,7 @@ class SettingsDialog(QDialog):
             logger.error(f"Failed to load settings: {e}")
             # Use defaults on error
             self.auto_paste_check.setChecked(True)
-            self.copy_clipboard_check.setChecked(True)
+            self.copy_clipboard_check.setChecked(False)
             self.minimize_tray_check.setChecked(True)
             self.streaming_enabled_check.setChecked(config.STREAMING_ENABLED)
             self.streaming_paste_check.setChecked(False)
@@ -544,7 +708,7 @@ class SettingsDialog(QDialog):
             # Check if whisper engine settings changed
             old_whisper_model = settings.get(SettingsKey.WHISPER_MODEL, config.DEFAULT_WHISPER_MODEL)
             old_device = settings.get(SettingsKey.WHISPER_DEVICE, 'auto')
-            old_compute = settings.get(SettingsKey.WHISPER_COMPUTE_TYPE, 'auto')
+            old_compute = settings.get(SettingsKey.WHISPER_COMPUTE_TYPE, config.FASTER_WHISPER_COMPUTE_TYPE)
             new_whisper_model = self.whisper_model_combo.currentText()
             new_device = self.whisper_device_combo.currentText()
             new_compute = self.whisper_compute_combo.currentText()
@@ -580,6 +744,18 @@ class SettingsDialog(QDialog):
             settings[SettingsKey.WHISPER_MODEL] = new_whisper_model
             settings[SettingsKey.WHISPER_DEVICE] = new_device
             settings[SettingsKey.WHISPER_COMPUTE_TYPE] = new_compute
+            settings[SettingsKey.TEXT_INJECTION_MODE] = self.injection_mode_combo.currentText()
+            settings[SettingsKey.TEXT_INJECTION_KEY_DELAY_MS] = self.injection_delay_spinbox.value()
+            settings[SettingsKey.TEXT_INJECTION_LONG_TEXT_THRESHOLD] = self.long_text_threshold_spinbox.value()
+            settings[SettingsKey.HISTORY_ENABLED] = self.history_enabled_check.isChecked()
+            settings[SettingsKey.HISTORY_RETENTION_LIMIT] = self.history_limit_spinbox.value()
+            settings[SettingsKey.POLISH_ENABLED] = self.polish_enabled_check.isChecked()
+            settings[SettingsKey.POLISH_MODEL] = self.polish_model_edit.text().strip() or config.POLISH_MODEL
+            settings[SettingsKey.POLISH_WORD_THRESHOLD] = self.polish_word_threshold_spinbox.value()
+            settings[SettingsKey.POLISH_TIMEOUT_MS] = self.polish_timeout_spinbox.value()
+            settings[SettingsKey.POLISH_OLLAMA_URL] = settings.get(
+                SettingsKey.POLISH_OLLAMA_URL, config.POLISH_OLLAMA_URL
+            )
 
             # Save audio input device (None for system default)
             if new_audio_device is None:

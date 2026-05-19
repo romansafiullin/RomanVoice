@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Dict
 
@@ -29,7 +30,15 @@ class HotkeyRuntime:
         """Setup hotkey management."""
         logger.info("Setting up hotkeys...")
         hotkeys = settings_manager.load_hotkey_settings()
-        self.controller.hotkey_manager = HotkeyManager(hotkeys)
+        logger.info("Configured hotkeys: %s", hotkeys)
+
+        if not config.ENABLE_GLOBAL_HOTKEYS:
+            logger.info("Global hotkeys disabled; using UI controls only")
+            self.controller.hotkey_manager = None
+            self.controller.ui_controller.update_hotkey_display(hotkeys)
+            return
+
+        self.controller.hotkey_manager = self._create_hotkey_manager(hotkeys)
         self.controller.hotkey_manager.set_callbacks(
             on_record_toggle=self.controller.toggle_recording,
             on_cancel=self.controller.cancel,
@@ -41,13 +50,37 @@ class HotkeyRuntime:
     def update_hotkeys(self, hotkeys: Dict[str, str]) -> None:
         """Update application hotkeys."""
         logger.info(f"Updating hotkeys: {hotkeys}")
+        if not config.ENABLE_GLOBAL_HOTKEYS:
+            settings_manager.save_hotkey_settings(hotkeys)
+            self.controller.ui_controller.update_hotkey_display(hotkeys)
+            self.controller.ui_controller.set_status("Hotkeys saved (disabled for UI test)")
+            return
+
         if self.controller.hotkey_manager:
             self.controller.hotkey_manager.update_hotkeys(hotkeys)
             settings_manager.save_hotkey_settings(hotkeys)
             self.controller.ui_controller.set_status("Hotkeys updated")
 
+    def _create_hotkey_manager(self, hotkeys: Dict[str, str]):
+        """Create the configured hotkey backend."""
+        if os.name == "nt" and config.HOTKEY_BACKEND == "win32":
+            try:
+                from services.win32_hotkey_manager import Win32HotkeyManager
+
+                logger.info("Using Win32 RegisterHotKey backend")
+                return Win32HotkeyManager(hotkeys)
+            except Exception as exc:
+                logger.error("Failed to start Win32 hotkey backend: %s", exc)
+
+        logger.info("Using keyboard hook hotkey backend")
+        return HotkeyManager(hotkeys)
+
     def setup_hook_watchdog(self) -> None:
         """Setup timers to detect sleep and refresh the keyboard hook."""
+        if not config.ENABLE_GLOBAL_HOTKEYS:
+            logger.info("Global hotkey watchdog disabled")
+            return
+
         self.controller._watchdog_interval_ms = config.HOTKEY_WATCHDOG_INTERVAL_MS
         self.controller._sleep_gap_threshold_sec = config.HOTKEY_SLEEP_GAP_THRESHOLD_SEC
         self.controller._expected_watchdog_time = time.monotonic() + (

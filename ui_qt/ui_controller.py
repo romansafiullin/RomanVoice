@@ -11,7 +11,13 @@ from PyQt6.QtWidgets import QMessageBox
 from config import config
 from ui_qt.overlay_state import OverlayState
 from ui_qt.main_window import MainWindow
-from ui_qt.overlays import CaretPasteIndicator, StreamingTextOverlay, WaveformOverlay
+from ui_qt.overlays import (
+    CaretPasteIndicator,
+    CaretPreviewOverlay,
+    CompactStatusOverlay,
+    StreamingTextOverlay,
+    WaveformOverlay,
+)
 from ui_qt.system_tray import SystemTrayManager
 from ui_qt.dialogs.settings_dialog import SettingsDialog
 from ui_qt.dialogs.hotkey_dialog import HotkeyDialog
@@ -40,6 +46,8 @@ class UIController(QObject):
         # Create UI components
         self.main_window = MainWindow()
         self.overlay = WaveformOverlay()
+        self.compact_status_overlay = CompactStatusOverlay()
+        self.caret_preview_overlay = CaretPreviewOverlay()
         self.streaming_overlay = StreamingTextOverlay()
         self.caret_paste_indicator = CaretPasteIndicator()
         self.tray_manager = SystemTrayManager(self.main_window)
@@ -173,6 +181,7 @@ class UIController(QObject):
     def _apply_audio_levels_to_overlay(self, levels: List[float]):
         """Forward audio level updates to the waveform overlay."""
         self.overlay.update_audio_levels(levels)
+        self.compact_status_overlay.update_audio_levels(levels)
 
     def start_recording(self):
         """Start recording."""
@@ -267,6 +276,10 @@ class UIController(QObject):
         Centralizes all "show waveform vs streaming overlay vs hide everything"
         logic in one place.
         """
+        if config.COMPACT_STATUS_OVERLAY:
+            self._set_compact_overlay_state(state)
+            return
+
         if state is OverlayState.CANCELING:
             self.tray_manager.set_recording(False)
             self._start_cancel_animation()
@@ -311,6 +324,39 @@ class UIController(QObject):
         else:
             self.overlay.set_state(overlay_state)
 
+    def _set_compact_overlay_state(self, state: OverlayState) -> None:
+        """Use the compact overlay for background dictation states."""
+        self.hide_overlay()
+
+        if state is OverlayState.NONE:
+            self.tray_manager.set_recording(False)
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_IDLE)
+            self.caret_preview_overlay.hide_preview()
+            self.hide_streaming_overlay()
+            self.hide_caret_paste_indicator()
+            self.streaming_flow_active = False
+            return
+
+        if state is OverlayState.RECORDING:
+            self.tray_manager.set_recording(True)
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_RECORDING)
+        elif state is OverlayState.PROCESSING:
+            self.tray_manager.set_recording(False)
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_PROCESSING)
+            self.caret_preview_overlay.hide_preview()
+        elif state is OverlayState.TRANSCRIBING:
+            self.tray_manager.set_recording(False)
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_TRANSCRIBING)
+        elif state is OverlayState.CANCELING:
+            self.tray_manager.set_recording(False)
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_CANCELING)
+            self.caret_preview_overlay.hide_preview()
+            self.streaming_flow_active = False
+        elif state is OverlayState.STT_ENABLED:
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_ENABLED)
+        elif state is OverlayState.STT_DISABLED:
+            self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_DISABLED)
+
     def update_audio_levels(self, levels: List[float]):
         """Update audio level display."""
         self.audio_levels = levels
@@ -345,6 +391,16 @@ class UIController(QObject):
             is_final: Whether this chunk is finalized
         """
         self.streaming_overlay.update_streaming_text(text, is_final)
+
+    def set_live_preview(self, text: str, is_final: bool):
+        """Update live preview text in the compact dictation overlay."""
+        if not config.COMPACT_STATUS_OVERLAY or not config.COMPACT_OVERLAY_LIVE_PREVIEW:
+            return
+        shown_at_caret = self.caret_preview_overlay.set_preview_text(text)
+        if shown_at_caret:
+            self.compact_status_overlay.set_preview_text("")
+        else:
+            self.compact_status_overlay.set_preview_text(text)
 
     def hide_streaming_overlay(self):
         """Hide the streaming text overlay with animation."""
@@ -543,6 +599,20 @@ class UIController(QObject):
             self.overlay.close()
         except Exception as e:
             logger.debug(f"Error closing overlay: {e}")
+
+        try:
+            if hasattr(self, 'compact_status_overlay'):
+                self.compact_status_overlay.hide()
+                self.compact_status_overlay.close()
+        except Exception as e:
+            logger.debug(f"Error closing compact status overlay: {e}")
+
+        try:
+            if hasattr(self, 'caret_preview_overlay'):
+                self.caret_preview_overlay.hide_preview()
+                self.caret_preview_overlay.close()
+        except Exception as e:
+            logger.debug(f"Error closing caret preview overlay: {e}")
 
         # Cleanup streaming overlay
         try:

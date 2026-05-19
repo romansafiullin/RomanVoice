@@ -16,12 +16,15 @@ except ImportError:  # pragma: no cover - supports lightweight test stubs
         STREAMING_CHUNK_DURATION = "streaming_chunk_duration"
         STREAMING_PASTE_ENABLED = "streaming_paste_enabled"
         STREAMING_TINY_MODEL_ENABLED = "streaming_tiny_model_enabled"
+        LIVE_TYPE_ENABLED = "live_type_enabled"
+        TEXT_INJECTION_KEY_DELAY_MS = "text_injection_key_delay_ms"
 
 if TYPE_CHECKING:
     from services.recorder import AudioLevelCallback
 else:
     AudioLevelCallback = Callable[[float], None]
 from services.streaming_transcriber import StreamingTranscriber
+from services.text_injector import text_injector
 from transcriber import LocalWhisperBackend
 
 if TYPE_CHECKING:
@@ -66,6 +69,8 @@ class StreamingRuntime:
 
     def on_partial_transcription(self, text: str, is_final: bool) -> None:
         """Handle partial transcription from the streaming worker."""
+        self.controller._last_streaming_text = text or ""
+        self._type_live_update(text or "")
         self.controller.partial_transcription.emit(text, is_final)
         if self.controller._streaming_paste_enabled and text:
             self.controller.streaming_text_update.emit(text, is_final)
@@ -79,7 +84,7 @@ class StreamingRuntime:
             self.controller.streaming_transcriber.feed_audio
         )
         self.controller.streaming_transcriber.start_streaming(
-            sample_rate=config.SAMPLE_RATE,
+            sample_rate=self.controller.recorder.rate,
             callback=self.on_partial_transcription,
         )
         logger.info("Streaming transcription started")
@@ -93,6 +98,8 @@ class StreamingRuntime:
             return ""
 
         streaming_text = self.controller.streaming_transcriber.stop_streaming()
+        if streaming_text:
+            self.controller._last_streaming_text = streaming_text
         self.controller.recorder.set_streaming_callback(None)
         logger.info(
             f"Streaming transcription stopped, got {len(streaming_text)} chars"
@@ -184,6 +191,36 @@ class StreamingRuntime:
             self.controller._streaming_paste_enabled = False
             if not initial_setup:
                 self.controller.ui_controller.set_status("Failed to reconfigure streaming")
+
+    def _type_live_update(self, text: str) -> None:
+        if not text or self.controller._live_typing_failed:
+            return
+
+        try:
+            settings = settings_manager.load_all_settings()
+            enabled = settings.get(SettingsKey.LIVE_TYPE_ENABLED, config.LIVE_TYPE_ENABLED)
+            if not enabled:
+                return
+
+            result = text_injector.update_live_text(
+                self.controller._live_typed_text,
+                text,
+                key_delay_ms=int(
+                    settings.get(
+                        SettingsKey.TEXT_INJECTION_KEY_DELAY_MS,
+                        config.TEXT_INJECTION_KEY_DELAY_MS,
+                    )
+                ),
+            )
+            if result.success:
+                self.controller._live_typed_text = text
+                logger.info("Live typed streaming update (%s chars)", len(text))
+            else:
+                self.controller._live_typing_failed = True
+                logger.error("Live typing failed: %s", result.error)
+        except Exception as exc:
+            self.controller._live_typing_failed = True
+            logger.error("Live typing failed: %s", exc)
 
     def _cleanup_streaming_resources(self) -> None:
         if self.controller.streaming_transcriber:

@@ -23,6 +23,31 @@ class TestAudioRecorder(unittest.TestCase):
         # Mock sounddevice to avoid actual audio hardware
         self.sd_patcher = patch('services.recorder.sd.InputStream')
         self.mock_sd_stream = self.sd_patcher.start()
+        self.sd_query_patcher = patch('services.recorder.sd.query_devices')
+        self.mock_query_devices = self.sd_query_patcher.start()
+        self.mock_query_devices.side_effect = lambda device=None: (
+            {
+                'name': 'Test Microphone',
+                'hostapi': 0,
+                'max_input_channels': 1,
+                'default_samplerate': config.SAMPLE_RATE,
+            }
+            if device is not None
+            else [
+                {
+                    'name': 'Test Microphone',
+                    'hostapi': 0,
+                    'max_input_channels': 1,
+                    'default_samplerate': config.SAMPLE_RATE,
+                }
+            ]
+        )
+        self.sd_hostapis_patcher = patch('services.recorder.sd.query_hostapis')
+        self.mock_query_hostapis = self.sd_hostapis_patcher.start()
+        self.mock_query_hostapis.return_value = [{'name': 'MME'}]
+        self.sd_default_patcher = patch('services.recorder.sd.default')
+        self.mock_sd_default = self.sd_default_patcher.start()
+        self.mock_sd_default.device = [0, None]
 
         # Create recorder instance
         self.recorder = AudioRecorder()
@@ -30,6 +55,9 @@ class TestAudioRecorder(unittest.TestCase):
     def tearDown(self):
         """Clean up test fixtures."""
         self.sd_patcher.stop()
+        self.sd_query_patcher.stop()
+        self.sd_hostapis_patcher.stop()
+        self.sd_default_patcher.stop()
 
         if os.path.exists(self.test_audio_file):
             os.remove(self.test_audio_file)
@@ -100,10 +128,35 @@ class TestAudioRecorder(unittest.TestCase):
         self.assertEqual(self.recorder.get_recording_duration(), 0.0)
 
         # Add fake frames
-        # Each frame is chunk_size samples, so duration = num_frames * chunk_size / sample_rate
+        # Duration is based on captured byte count, sample width, channels, and sample rate.
         self.recorder.frames = [b'x' * 100] * 10  # 10 frames of 100 bytes each
-        expected_duration = (10 * config.CHUNK_SIZE) / config.SAMPLE_RATE
+        expected_duration = 1000 / (
+            np.dtype(config.AUDIO_FORMAT).itemsize * config.CHANNELS * config.SAMPLE_RATE
+        )
         self.assertEqual(self.recorder.get_recording_duration(), expected_duration)
+
+    def test_initialization_uses_device_native_sample_rate(self):
+        """Test that recorder uses the selected device's default sample rate."""
+        self.mock_query_devices.side_effect = lambda device=None: {
+            'name': 'Native Rate Microphone',
+            'hostapi': 0,
+            'max_input_channels': 1,
+            'default_samplerate': 16000,
+        }
+
+        recorder = AudioRecorder(device_id=21)
+
+        self.assertEqual(recorder.device_id, 21)
+        self.assertEqual(recorder.rate, 16000)
+
+    def test_start_recording_reports_stream_open_failure(self):
+        """Test that start_recording returns false if the audio stream cannot open."""
+        self.mock_sd_stream.side_effect = RuntimeError("Invalid sample rate")
+
+        result = self.recorder.start_recording()
+
+        self.assertFalse(result)
+        self.assertFalse(self.recorder.is_recording)
 
     def test_save_recording_no_data(self):
         """Test saving recording with no data."""

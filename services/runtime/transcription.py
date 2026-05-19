@@ -7,12 +7,15 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-import keyboard
 import pyperclip
 
 from config import config
 from services.audio_processor import audio_processor
+from services.gpu_guard import gpu_guard
 from services.history_manager import history_manager
+from services.polisher import local_polisher
+from services.text_injector import text_injector
+from transcriber import LocalWhisperBackend
 try:
     from services.settings import SettingsKey, settings_manager
 except ImportError:  # pragma: no cover - supports lightweight test stubs
@@ -21,6 +24,15 @@ except ImportError:  # pragma: no cover - supports lightweight test stubs
     class SettingsKey:
         AUTO_PASTE = "auto_paste"
         COPY_CLIPBOARD = "copy_clipboard"
+        TEXT_INJECTION_MODE = "text_injection_mode"
+        TEXT_INJECTION_KEY_DELAY_MS = "text_injection_key_delay_ms"
+        TEXT_INJECTION_LONG_TEXT_THRESHOLD = "text_injection_long_text_threshold"
+        LIVE_TYPE_ENABLED = "live_type_enabled"
+        POLISH_ENABLED = "polish_enabled"
+        POLISH_MODEL = "polish_model"
+        POLISH_WORD_THRESHOLD = "polish_word_threshold"
+        POLISH_TIMEOUT_MS = "polish_timeout_ms"
+        POLISH_OLLAMA_URL = "polish_ollama_url"
 
 from ui_qt.overlay_state import OverlayState
 
@@ -40,6 +52,9 @@ class TranscriptionRuntime:
         """Start audio recording."""
         if self.controller.recorder.start_recording():
             logger.info("Recording started")
+            self.controller._last_streaming_text = ""
+            self.controller._live_typed_text = ""
+            self.controller._live_typing_failed = False
             self.controller.ui_controller.clear_transcription_stats()
             self.controller.ui_controller.main_window.clear_partial_transcription()
             self.controller.streaming_runtime.start_streaming_session()
@@ -97,6 +112,25 @@ class TranscriptionRuntime:
             self.on_transcription_error("Audio file is empty or corrupted")
             return
 
+        metrics_fn = getattr(self.controller.recorder, "get_recording_signal_metrics", None)
+        if callable(metrics_fn):
+            metrics = metrics_fn()
+            logger.info("Recording signal metrics: %s", metrics)
+            samples = int(metrics.get("samples", 0))
+            peak = int(metrics.get("peak", 0))
+            if samples <= 0 or peak <= 0:
+                self.on_transcription_error(
+                    "No microphone input detected. Check the selected microphone/input level."
+                )
+                return
+            if peak < config.MIN_MIC_INPUT_PEAK:
+                logger.warning(
+                    "Recording peak is low (%s < %s); continuing because Whisper can "
+                    "still transcribe quiet microphone input",
+                    peak,
+                    config.MIN_MIC_INPUT_PEAK,
+                )
+
         self.controller._pending_audio_path = config.RECORDED_AUDIO_FILE
         self.controller._pending_audio_duration = (
             self.controller.recorder.get_recording_duration()
@@ -119,6 +153,10 @@ class TranscriptionRuntime:
             f"Toggle recording. Current state: {self.controller.recorder.is_recording}"
         )
         if not self.controller.recorder.is_recording:
+            active_backend = self._get_active_transcription_backend()
+            if active_backend and active_backend.is_transcribing:
+                logger.info("Start requested during transcription; canceling and restarting")
+                self._cancel_transcription()
             self.start_recording()
         else:
             self.stop_recording()
@@ -129,7 +167,10 @@ class TranscriptionRuntime:
 
         if self.controller.recorder.is_recording:
             self._cancel_recording()
-        elif self.controller.current_backend and self.controller.current_backend.is_transcribing:
+        elif (
+            self._get_active_transcription_backend()
+            and self._get_active_transcription_backend().is_transcribing
+        ):
             self._cancel_transcription()
         else:
             self.controller.overlay_state_update.emit(OverlayState.CANCELING)
@@ -147,7 +188,14 @@ class TranscriptionRuntime:
 
     def _cancel_transcription(self) -> None:
         """Cancel an in-progress transcription job."""
-        self.controller.current_backend.cancel_transcription()
+        self.controller._transcription_job_id += 1
+        active_backend = self._get_active_transcription_backend()
+        if active_backend:
+            active_backend.cancel_transcription()
+        self.controller._pending_audio_path = None
+        self.controller._pending_audio_duration = None
+        self.controller._pending_file_size = None
+        self.controller._transcription_start_time = None
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Transcription canceled")
         logger.info("Transcription canceled")
@@ -196,7 +244,7 @@ class TranscriptionRuntime:
             logger.error(f"Failed to process uploaded audio: {exc}")
             self.on_transcription_error(f"Failed to process audio: {exc}")
 
-    def transcribe_audio_file(self, audio_path: str) -> None:
+    def transcribe_audio_file(self, audio_path: str, job_id: int) -> None:
         """Transcribe a single audio file in a background thread."""
         try:
             if self.controller._pending_file_size is None:
@@ -204,13 +252,28 @@ class TranscriptionRuntime:
             self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
             self.controller.status_update.emit("Transcribing...")
             self.controller._transcription_start_time = time.time()
-            transcript = self.controller.current_backend.transcribe(audio_path)
-            self.controller.transcription_completed.emit(transcript)
+            backend = self._select_backend_for_transcription()
+            self.controller._active_transcription_backend = backend
+            transcript = backend.transcribe(audio_path)
+            if not transcript.strip() and self.controller._last_streaming_text.strip():
+                transcript = self.controller._last_streaming_text.strip()
+                logger.info(
+                    "Using streaming transcript fallback after empty final pass (%s chars)",
+                    len(transcript),
+                )
+            transcript = self._maybe_polish_transcript(transcript)
+            if self._is_current_job(job_id):
+                self.controller.transcription_completed.emit(transcript)
+            else:
+                logger.info("Discarded stale transcription result for job %s", job_id)
         except Exception as exc:
             logger.error(f"Transcription failed: {exc}")
-            self.controller.transcription_failed.emit(str(exc))
+            if self._is_current_job(job_id):
+                self.controller.transcription_failed.emit(str(exc))
+        finally:
+            self.controller._active_transcription_backend = None
 
-    def transcribe_large_audio_file(self, audio_path: str) -> None:
+    def transcribe_large_audio_file(self, audio_path: str, job_id: int) -> None:
         """Transcribe a large audio file by splitting it into chunks."""
         chunk_files = []
         if self.controller._pending_file_size is None:
@@ -226,14 +289,15 @@ class TranscriptionRuntime:
             if not chunk_files:
                 raise Exception("Failed to split audio file")
 
-            if hasattr(self.controller.current_backend, "transcribe_chunks"):
+            backend = self._select_backend_for_transcription()
+            self.controller._active_transcription_backend = backend
+
+            if hasattr(backend, "transcribe_chunks"):
                 self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
                 self.controller.status_update.emit(
                     f"Transcribing {len(chunk_files)} chunks..."
                 )
-                transcript = self.controller.current_backend.transcribe_chunks(
-                    chunk_files
-                )
+                transcript = backend.transcribe_chunks(chunk_files)
             else:
                 transcripts = []
                 for index, chunk_file in enumerate(chunk_files):
@@ -241,16 +305,27 @@ class TranscriptionRuntime:
                     self.controller.status_update.emit(
                         f"Transcribing chunk {index + 1}/{len(chunk_files)}..."
                     )
-                    transcripts.append(
-                        self.controller.current_backend.transcribe(chunk_file)
-                    )
+                    transcripts.append(backend.transcribe(chunk_file))
                 transcript = audio_processor.combine_transcriptions(transcripts)
 
-            self.controller.transcription_completed.emit(transcript)
+            if not transcript.strip() and self.controller._last_streaming_text.strip():
+                transcript = self.controller._last_streaming_text.strip()
+                logger.info(
+                    "Using streaming transcript fallback after empty large final pass (%s chars)",
+                    len(transcript),
+                )
+
+            transcript = self._maybe_polish_transcript(transcript)
+            if self._is_current_job(job_id):
+                self.controller.transcription_completed.emit(transcript)
+            else:
+                logger.info("Discarded stale large transcription result for job %s", job_id)
         except Exception as exc:
             logger.error(f"Large audio transcription failed: {exc}")
-            self.controller.transcription_failed.emit(str(exc))
+            if self._is_current_job(job_id):
+                self.controller.transcription_failed.emit(str(exc))
         finally:
+            self.controller._active_transcription_backend = None
             try:
                 audio_processor.cleanup_temp_files()
             except Exception as cleanup_error:
@@ -260,6 +335,30 @@ class TranscriptionRuntime:
 
     def on_transcription_complete(self, transcript: str) -> None:
         """Handle transcription completion."""
+        transcript = (transcript or "").strip()
+        if not transcript and self.controller._last_streaming_text.strip():
+            transcript = self.controller._last_streaming_text.strip()
+            logger.info(
+                "Using streaming transcript fallback during completion (%s chars)",
+                len(transcript),
+            )
+
+        if not transcript.strip():
+            logger.info("Empty transcript; skipping history and text injection")
+            self.controller.ui_controller.set_transcript("")
+            self.controller.ui_controller.set_status("No speech detected")
+            self.controller.overlay_state_update.emit(OverlayState.NONE)
+            self.controller._pending_audio_path = None
+            self.controller._pending_audio_duration = None
+            self.controller._pending_file_size = None
+            self.controller._transcription_start_time = None
+            if self.controller._streaming_paste_enabled:
+                self.controller.caret_indicator_hide.emit()
+            self.controller._last_streaming_text = ""
+            self.controller._live_typed_text = ""
+            self.controller._live_typing_failed = False
+            return
+
         self.controller.ui_controller.set_transcript(transcript)
         self.controller.ui_controller.set_status("Transcription complete!")
         self.controller.overlay_state_update.emit(OverlayState.NONE)
@@ -301,8 +400,90 @@ class TranscriptionRuntime:
             self.controller._pending_file_size = None
 
         settings = settings_manager.load_all_settings()
-        copy_clipboard = settings.get(SettingsKey.COPY_CLIPBOARD, True)
+        copy_clipboard = settings.get(SettingsKey.COPY_CLIPBOARD, False)
         auto_paste = settings.get(SettingsKey.AUTO_PASTE, True)
+        live_type_enabled = settings.get(
+            SettingsKey.LIVE_TYPE_ENABLED, config.LIVE_TYPE_ENABLED
+        )
+        key_delay_ms = int(
+            settings.get(
+                SettingsKey.TEXT_INJECTION_KEY_DELAY_MS,
+                config.TEXT_INJECTION_KEY_DELAY_MS,
+            )
+        )
+        injection_mode = settings.get(
+            SettingsKey.TEXT_INJECTION_MODE, config.TEXT_INJECTION_MODE
+        )
+        long_text_threshold = int(
+            settings.get(
+                SettingsKey.TEXT_INJECTION_LONG_TEXT_THRESHOLD,
+                config.TEXT_INJECTION_LONG_TEXT_THRESHOLD,
+            )
+        )
+        inserted_transcript = False
+        text_injection_failed = False
+
+        if live_type_enabled:
+            previous_live_text = self.controller._live_typed_text
+            result = text_injector.update_live_text(
+                previous_live_text,
+                transcript,
+                key_delay_ms=key_delay_ms,
+            )
+            if result.success:
+                self.controller._live_typed_text = transcript
+                inserted_transcript = True
+                logger.info("Live typed final transcript (%s chars)", len(transcript))
+            else:
+                logger.error("Failed to reconcile live typed transcript: %s", result.error)
+                if not previous_live_text:
+                    fallback = text_injector.inject(
+                        transcript,
+                        mode=injection_mode,
+                        key_delay_ms=key_delay_ms,
+                        long_text_threshold=long_text_threshold,
+                    )
+                    if fallback.success:
+                        inserted_transcript = True
+                        logger.info(
+                            "Transcription inserted via %s after live typing failed",
+                            fallback.method,
+                        )
+                    else:
+                        text_injection_failed = True
+                        logger.error(
+                            "Failed to inject transcription after live typing failed: %s",
+                            fallback.error,
+                        )
+                else:
+                    text_injection_failed = True
+                    logger.warning(
+                        "Skipping full-text fallback because %s chars were already live typed",
+                        len(previous_live_text),
+                    )
+
+        if auto_paste and not live_type_enabled:
+            result = text_injector.inject(
+                transcript,
+                mode=injection_mode,
+                key_delay_ms=key_delay_ms,
+                long_text_threshold=long_text_threshold,
+            )
+            if result.success:
+                inserted_transcript = True
+                logger.info("Transcription injected via %s", result.method)
+            else:
+                text_injection_failed = True
+                logger.error("Failed to inject transcription: %s", result.error)
+
+        if inserted_transcript:
+            self.controller.ui_controller.set_status("Ready (Pasted)")
+        elif text_injection_failed:
+            self.controller.ui_controller.set_status(
+                "Transcription complete (text injection failed)"
+            )
+        else:
+            self.controller.ui_controller.set_status("Ready")
 
         if copy_clipboard:
             try:
@@ -311,21 +492,12 @@ class TranscriptionRuntime:
             except Exception as exc:
                 logger.error(f"Failed to copy to clipboard: {exc}")
 
-        if auto_paste:
-            try:
-                keyboard.send("ctrl+v")
-                logger.info("Transcription auto-pasted")
-                self.controller.ui_controller.set_status("Ready (Pasted)")
-            except Exception as exc:
-                logger.error(f"Failed to auto-paste: {exc}")
-                self.controller.ui_controller.set_status(
-                    "Transcription complete (paste failed)"
-                )
-        else:
-            self.controller.ui_controller.set_status("Ready")
-
         if self.controller._streaming_paste_enabled:
             self.controller.caret_indicator_hide.emit()
+
+        self.controller._last_streaming_text = ""
+        self.controller._live_typed_text = ""
+        self.controller._live_typing_failed = False
 
     def on_transcription_error(self, error_message: str) -> None:
         """Handle transcription error."""
@@ -334,6 +506,8 @@ class TranscriptionRuntime:
         self.controller.overlay_state_update.emit(OverlayState.NONE)
         if self.controller._streaming_paste_enabled:
             self.controller.caret_indicator_hide.emit()
+        self.controller._live_typed_text = ""
+        self.controller._live_typing_failed = False
 
     def on_model_changed(self, model_name: str) -> None:
         """Handle model selection change."""
@@ -366,6 +540,8 @@ class TranscriptionRuntime:
             overlay.show_at_cursor(overlay.STATE_LARGE_FILE_PROCESSING)
 
     def _submit_transcription_job(self, audio_path: str) -> None:
+        self.controller._transcription_job_id += 1
+        job_id = self.controller._transcription_job_id
         needs_splitting, file_size_mb = audio_processor.check_file_size(audio_path)
         should_split = (
             needs_splitting and self.controller.current_backend.requires_file_splitting
@@ -380,7 +556,7 @@ class TranscriptionRuntime:
                 f"Splitting large file ({file_size_mb:.1f} MB)..."
             )
             self.controller.executor.submit(
-                self.transcribe_large_audio_file, audio_path
+                self.transcribe_large_audio_file, audio_path, job_id
             )
         elif needs_splitting:
             logger.info(
@@ -390,6 +566,78 @@ class TranscriptionRuntime:
             self.controller.status_update.emit(
                 f"Processing large file ({file_size_mb:.1f} MB)..."
             )
-            self.controller.executor.submit(self.transcribe_audio_file, audio_path)
+            self.controller.executor.submit(self.transcribe_audio_file, audio_path, job_id)
         else:
-            self.controller.executor.submit(self.transcribe_audio_file, audio_path)
+            self.controller.executor.submit(self.transcribe_audio_file, audio_path, job_id)
+
+    def _is_current_job(self, job_id: int) -> bool:
+        return job_id == self.controller._transcription_job_id
+
+    def _get_active_transcription_backend(self):
+        return (
+            getattr(self.controller, "_active_transcription_backend", None)
+            or self.controller.current_backend
+        )
+
+    def _select_backend_for_transcription(self):
+        backend = self.controller.current_backend
+        if not self._should_guard_cuda_backend(backend):
+            return backend
+
+        if gpu_guard.wait_for_cuda_budget(
+            "final transcription",
+            max_wait_ms=config.GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS,
+        ):
+            return backend
+
+        logger.warning("Using CPU fallback because CUDA is still busy")
+        self.controller.status_update.emit("GPU busy; using CPU fallback...")
+        return self._get_cpu_fallback_backend()
+
+    def _should_guard_cuda_backend(self, backend) -> bool:
+        return (
+            config.GPU_COOPERATIVE_MODE
+            and isinstance(backend, LocalWhisperBackend)
+            and getattr(backend, "prefers_cuda", False)
+        )
+
+    def _get_cpu_fallback_backend(self):
+        backend = getattr(self.controller, "_cpu_fallback_backend", None)
+        if backend is None:
+            logger.info(
+                "Loading CPU fallback backend: %s",
+                config.GPU_BUSY_CPU_FALLBACK_MODEL,
+            )
+            backend = LocalWhisperBackend(
+                model_name=config.GPU_BUSY_CPU_FALLBACK_MODEL,
+                device="cpu",
+                compute_type="int8",
+                autoload=True,
+            )
+            self.controller._cpu_fallback_backend = backend
+        return backend
+
+    def _maybe_polish_transcript(self, transcript: str) -> str:
+        settings = settings_manager.load_all_settings()
+        result = local_polisher.maybe_polish(
+            transcript,
+            enabled=settings.get(SettingsKey.POLISH_ENABLED, config.POLISH_ENABLED),
+            model=settings.get(SettingsKey.POLISH_MODEL, config.POLISH_MODEL),
+            word_threshold=int(
+                settings.get(
+                    SettingsKey.POLISH_WORD_THRESHOLD,
+                    config.POLISH_WORD_THRESHOLD,
+                )
+            ),
+            timeout_ms=int(
+                settings.get(SettingsKey.POLISH_TIMEOUT_MS, config.POLISH_TIMEOUT_MS)
+            ),
+            ollama_url=settings.get(
+                SettingsKey.POLISH_OLLAMA_URL, config.POLISH_OLLAMA_URL
+            ),
+        )
+        if result.used_polish:
+            logger.info("Applied local polish")
+        elif result.error:
+            logger.info("Using raw transcript after polish fallback: %s", result.error)
+        return result.text

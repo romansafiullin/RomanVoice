@@ -5,6 +5,7 @@ import unittest
 import tempfile
 import os
 import json
+import shutil
 from unittest.mock import patch
 
 from services.settings import SettingsManager
@@ -22,9 +23,7 @@ class TestSettingsManager(unittest.TestCase):
 
     def tearDown(self):
         """Clean up test fixtures."""
-        if os.path.exists(self.test_settings_file):
-            os.remove(self.test_settings_file)
-        os.rmdir(self.temp_dir)
+        shutil.rmtree(self.temp_dir)
 
     def test_load_hotkey_settings_default(self):
         """Test loading default hotkey settings when file doesn't exist."""
@@ -65,7 +64,10 @@ class TestSettingsManager(unittest.TestCase):
 
     def test_save_hotkey_settings_invalid_file(self):
         """Test saving hotkey settings with invalid file path."""
-        invalid_manager = SettingsManager("/invalid/path/settings.json")
+        blocker_path = os.path.join(self.temp_dir, "not_a_dir")
+        with open(blocker_path, "w") as f:
+            f.write("blocker")
+        invalid_manager = SettingsManager(os.path.join(blocker_path, "settings.json"))
 
         with self.assertRaises(Exception):
             invalid_manager.save_hotkey_settings({'test': 'value'})

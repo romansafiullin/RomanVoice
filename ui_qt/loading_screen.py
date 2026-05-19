@@ -115,7 +115,7 @@ class LoadingScreen(QWidget):
         # Title
         painter.setPen(self.text_color)
         painter.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        painter.drawText(QRectF(0, h - 90, w, 30), Qt.AlignmentFlag.AlignCenter, "OpenWhisper")
+        painter.drawText(QRectF(0, h - 90, w, 30), Qt.AlignmentFlag.AlignCenter, "RomanVoice")
 
         # Status
         painter.setPen(self.accent_color)

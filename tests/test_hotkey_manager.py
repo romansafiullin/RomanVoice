@@ -82,6 +82,18 @@ class TestHotkeyManager(unittest.TestCase):
         self.assertEqual(manager.hotkeys, original_hotkeys)
         self.assertIs(manager.on_record_toggle, callback)
 
+    @patch.object(HotkeyManager, "_setup_keyboard_hook")
+    def test_win_h_hotkey_matches_win_modifier(self, _mock_setup):
+        manager = HotkeyManager({"record_toggle": "win+h"})
+        event = types.SimpleNamespace(name="h", is_keypad=False)
+
+        with patch.object(
+            hotkey_manager_module.keyboard,
+            "is_pressed",
+            side_effect=lambda key: key == "win",
+        ):
+            self.assertTrue(manager._matches_hotkey(event, "win+h"))
+
 
 if __name__ == "__main__":
     unittest.main()

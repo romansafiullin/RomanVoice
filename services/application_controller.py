@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from config import config
 from services.database import db
@@ -17,8 +18,9 @@ from services.runtime import (
     StreamingRuntime,
     TranscriptionRuntime,
 )
+from services.gpu_guard import gpu_guard
 from services.settings import settings_manager
-from transcriber import LocalWhisperBackend, OpenAIBackend, TranscriptionBackend
+from transcriber import LocalWhisperBackend, TranscriptionBackend
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class ApplicationController(QObject):
     transcription_completed = pyqtSignal(str)
     transcription_failed = pyqtSignal(str)
     status_update = pyqtSignal(str)
+    device_info_update = pyqtSignal(str)
     stt_state_changed = pyqtSignal(bool)
     recording_state_changed = pyqtSignal(bool)
     partial_transcription = pyqtSignal(str, bool)
@@ -50,18 +53,25 @@ class ApplicationController(QObject):
         self.hotkey_manager = None
         self.streaming_transcriber = None
         self._streaming_backend = None
+        self._cpu_fallback_backend = None
+        self._shutdown_requested = Event()
 
         self.transcription_backends: Dict[str, TranscriptionBackend] = {}
         self.current_backend: Optional[TranscriptionBackend] = None
+        self._active_transcription_backend: Optional[TranscriptionBackend] = None
         self._current_model_name = "local_whisper"
 
         self._streaming_enabled = False
         self._streaming_paste_enabled = False
+        self._last_streaming_text = ""
+        self._live_typed_text = ""
+        self._live_typing_failed = False
 
         self._pending_audio_path: Optional[str] = None
         self._pending_audio_duration: Optional[float] = None
         self._pending_file_size: Optional[int] = None
         self._transcription_start_time: Optional[float] = None
+        self._transcription_job_id = 0
 
         self.hotkey_runtime = HotkeyRuntime(self)
         self.streaming_runtime = StreamingRuntime(self)
@@ -73,22 +83,109 @@ class ApplicationController(QObject):
         self.streaming_runtime.setup_audio_level_callback()
         self.streaming_runtime.setup_streaming()
         self._connect_signals()
+        self._setup_gpu_cooperation_monitor()
+        if config.PRELOAD_WHISPER_ON_START:
+            self._preload_local_whisper_async()
         self.hotkey_runtime.setup_hook_watchdog()
 
     def _setup_transcription_backends(self) -> None:
         """Initialize transcription backends."""
         logger.info("Setting up transcription backends...")
 
-        self.transcription_backends["local_whisper"] = LocalWhisperBackend()
-        self.transcription_backends["api_whisper"] = OpenAIBackend("api_whisper")
-        self.transcription_backends["api_gpt4o"] = OpenAIBackend("api_gpt4o")
-        self.transcription_backends["api_gpt4o_mini"] = OpenAIBackend("api_gpt4o_mini")
+        try:
+            self.transcription_backends["local_whisper"] = LocalWhisperBackend(autoload=False)
+        except TypeError:  # pragma: no cover - supports lightweight test doubles
+            self.transcription_backends["local_whisper"] = LocalWhisperBackend()
 
         saved_model = settings_manager.load_model_selection()
         self.current_backend = self.transcription_backends.get(
             saved_model, self.transcription_backends["local_whisper"]
         )
         logger.info(f"Using transcription backend: {saved_model}")
+
+    def _preload_local_whisper_async(self) -> None:
+        """Warm the local model after Qt signals are connected."""
+        local_backend = self.transcription_backends.get("local_whisper")
+        if not local_backend:
+            return
+
+        self.status_update.emit("Warming Whisper engine...")
+
+        def _load() -> None:
+            try:
+                if (
+                    config.GPU_COOPERATIVE_MODE
+                    and getattr(local_backend, "prefers_cuda", False)
+                ):
+                    while not self._shutdown_requested.is_set():
+                        status = gpu_guard.query_status()
+                        busy_reason = status.busy_reason()
+                        if not busy_reason:
+                            break
+                        logger.info("Deferring Whisper warmup; CUDA busy: %s", busy_reason)
+                        self.status_update.emit(
+                            "Ready (GPU busy; Whisper warmup deferred)"
+                        )
+                        if self._shutdown_requested.wait(
+                            config.GPU_BUSY_WARMUP_RETRY_MS / 1000
+                        ):
+                            return
+
+                if hasattr(local_backend, "ensure_loaded"):
+                    local_backend.ensure_loaded()
+                if hasattr(local_backend, "device_info"):
+                    logger.info("Whisper warmed: %s", local_backend.device_info)
+                    self.device_info_update.emit(local_backend.device_info)
+                self.status_update.emit("Ready")
+            except Exception as exc:
+                logger.error("Whisper warmup failed: %s", exc)
+                self.status_update.emit(f"Whisper warmup failed: {exc}")
+
+        self.executor.submit(_load)
+
+    def _setup_gpu_cooperation_monitor(self) -> None:
+        """Periodically release/reload Whisper based on shared GPU pressure."""
+        if not config.GPU_COOPERATIVE_MODE:
+            self._gpu_coop_timer = None
+            return
+
+        self._gpu_coop_timer = QTimer()
+        self._gpu_coop_timer.timeout.connect(self._on_gpu_cooperation_tick)
+        self._gpu_coop_timer.start(config.GPU_COOPERATIVE_MONITOR_MS)
+
+    def _on_gpu_cooperation_tick(self) -> None:
+        local_backend = self.transcription_backends.get("local_whisper")
+        if not isinstance(local_backend, LocalWhisperBackend):
+            return
+
+        active_backend = self._active_transcription_backend or self.current_backend
+        if self.recorder.is_recording or (
+            active_backend and active_backend.is_transcribing
+        ):
+            return
+
+        status = gpu_guard.query_status()
+        busy_reason = status.busy_reason()
+
+        if (
+            busy_reason
+            and local_backend.uses_cuda
+            and local_backend.is_available()
+            and not local_backend.is_loading
+        ):
+            logger.info("Unloading Whisper while CUDA is busy: %s", busy_reason)
+            self.device_info_update.emit("Whisper unloaded while GPU busy")
+            self.executor.submit(local_backend.cleanup)
+            return
+
+        if (
+            not busy_reason
+            and config.PRELOAD_WHISPER_ON_START
+            and not local_backend.is_available()
+            and not local_backend.is_loading
+        ):
+            logger.info("CUDA budget recovered; warming Whisper again")
+            self._preload_local_whisper_async()
 
     def _setup_ui_callbacks(self) -> None:
         """Setup UI event callbacks."""
@@ -181,6 +278,7 @@ class ApplicationController(QObject):
         self.transcription_completed.connect(self._on_transcription_complete)
         self.transcription_failed.connect(self._on_transcription_error)
         self.status_update.connect(self.ui_controller.set_status)
+        self.device_info_update.connect(self.ui_controller.set_device_info)
         if hasattr(self.ui_controller, "set_overlay_state"):
             self.overlay_state_update.connect(self.ui_controller.set_overlay_state)
         self.stt_state_changed.connect(self.hotkey_runtime.on_stt_state_changed)
@@ -188,6 +286,8 @@ class ApplicationController(QObject):
         self.partial_transcription.connect(
             self.ui_controller.main_window.set_partial_transcription
         )
+        if hasattr(self.ui_controller, "set_live_preview"):
+            self.partial_transcription.connect(self.ui_controller.set_live_preview)
         self.streaming_text_update.connect(self.ui_controller.update_streaming_text)
         self.streaming_overlay_show.connect(self.ui_controller.show_streaming_overlay)
         self.streaming_overlay_hide.connect(self.ui_controller.hide_streaming_overlay)
@@ -214,11 +314,13 @@ class ApplicationController(QObject):
     def cleanup(self) -> None:
         """Cleanup resources."""
         logger.info("Starting application cleanup...")
+        self._shutdown_requested.set()
 
         try:
-            if self.current_backend and self.current_backend.is_transcribing:
+            active_backend = self._active_transcription_backend or self.current_backend
+            if active_backend and active_backend.is_transcribing:
                 logger.info("Canceling ongoing transcription...")
-                self.current_backend.cancel_transcription()
+                active_backend.cancel_transcription()
         except Exception as exc:
             logger.debug(f"Error canceling transcription: {exc}")
 
@@ -227,6 +329,8 @@ class ApplicationController(QObject):
                 self._watchdog_timer.stop()
             if hasattr(self, "_periodic_refresh_timer") and self._periodic_refresh_timer:
                 self._periodic_refresh_timer.stop()
+            if hasattr(self, "_gpu_coop_timer") and self._gpu_coop_timer:
+                self._gpu_coop_timer.stop()
         except Exception as exc:
             logger.debug(f"Error stopping watchdog timers: {exc}")
 
@@ -265,6 +369,14 @@ class ApplicationController(QObject):
             self.current_backend = None
         except Exception as exc:
             logger.debug(f"Error during transcription backends cleanup: {exc}")
+
+        try:
+            if self._cpu_fallback_backend is not None:
+                logger.info("Cleaning up CPU fallback backend")
+                self._cpu_fallback_backend.cleanup()
+                self._cpu_fallback_backend = None
+        except Exception as exc:
+            logger.debug(f"Error during CPU fallback backend cleanup: {exc}")
 
         try:
             self.ui_controller.cleanup()

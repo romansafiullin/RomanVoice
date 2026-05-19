@@ -22,6 +22,17 @@ class SettingsKey:
     STREAMING_OVERLAY_POSITION: Final[str] = "streaming_overlay_position"
     AUTO_PASTE: Final[str] = "auto_paste"
     COPY_CLIPBOARD: Final[str] = "copy_clipboard"
+    TEXT_INJECTION_MODE: Final[str] = "text_injection_mode"
+    TEXT_INJECTION_KEY_DELAY_MS: Final[str] = "text_injection_key_delay_ms"
+    TEXT_INJECTION_LONG_TEXT_THRESHOLD: Final[str] = "text_injection_long_text_threshold"
+    LIVE_TYPE_ENABLED: Final[str] = "live_type_enabled"
+    HISTORY_ENABLED: Final[str] = "history_enabled"
+    HISTORY_RETENTION_LIMIT: Final[str] = "history_retention_limit"
+    POLISH_ENABLED: Final[str] = "polish_enabled"
+    POLISH_MODEL: Final[str] = "polish_model"
+    POLISH_WORD_THRESHOLD: Final[str] = "polish_word_threshold"
+    POLISH_TIMEOUT_MS: Final[str] = "polish_timeout_ms"
+    POLISH_OLLAMA_URL: Final[str] = "polish_ollama_url"
     MINIMIZE_TRAY: Final[str] = "minimize_tray"
     STREAMING_ENABLED: Final[str] = "streaming_enabled"
     STREAMING_CHUNK_DURATION: Final[str] = "streaming_chunk_duration"
@@ -54,7 +65,7 @@ class SettingsManager:
         """
         try:
             if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
+                with open(self.settings_file, 'r', encoding='utf-8-sig') as f:
                     return json.load(f)
         except Exception as e:
             logger.warning(f"Failed to load all settings: {e}")
@@ -71,7 +82,8 @@ class SettingsManager:
             Exception: If saving fails.
         """
         try:
-            with open(self.settings_file, 'w') as f:
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
             logger.info("All settings saved successfully")
         except Exception as e:
@@ -118,7 +130,7 @@ class SettingsManager:
         """
         try:
             if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
+                with open(self.settings_file, 'r', encoding='utf-8-sig') as f:
                     settings = json.load(f)
                     return settings.get(SettingsKey.HOTKEYS, config.DEFAULT_HOTKEYS)
         except Exception as e:
@@ -138,7 +150,8 @@ class SettingsManager:
         try:
             settings = self.load_all_settings()
             settings[SettingsKey.HOTKEYS] = hotkeys
-            with open(self.settings_file, 'w') as f:
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
             logger.info("Hotkey settings saved successfully")
         except Exception as e:
@@ -155,7 +168,7 @@ class SettingsManager:
         with self._lock:
             try:
                 if os.path.exists(self.settings_file):
-                    with open(self.settings_file, 'r') as f:
+                    with open(self.settings_file, 'r', encoding='utf-8-sig') as f:
                         settings = json.load(f)
 
                     current_style = settings.get(SettingsKey.CURRENT_WAVEFORM_STYLE, config.CURRENT_WAVEFORM_STYLE)
@@ -185,7 +198,12 @@ class SettingsManager:
         """
         try:
             selected_model = self.get(SettingsKey.SELECTED_MODEL)
-            if selected_model and selected_model in config.MODEL_VALUE_MAP.values():
+            visible_model_values = {
+                config.MODEL_VALUE_MAP[name]
+                for name in config.MODEL_CHOICES
+                if name in config.MODEL_VALUE_MAP
+            }
+            if selected_model and selected_model in visible_model_values:
                 return selected_model
         except Exception as e:
             logger.warning(f"Failed to load model selection: {e}")

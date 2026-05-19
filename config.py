@@ -2,7 +2,7 @@
 Configuration constants for the OpenWhisper application.
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
@@ -12,14 +12,49 @@ except ImportError:  # pragma: no cover - lightweight fallback for test/import e
     np = SimpleNamespace(int16="int16")
 
 
+def _appdata_dir() -> str:
+    base = os.environ.get("APPDATA")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+    return os.path.join(base, "RomanVoice")
+
+
+def _local_appdata_dir() -> str:
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "RomanVoice")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _start_hidden_default() -> bool:
+    # The full window should only appear from an explicit UI/debug launcher.
+    return not _env_bool("ROMANVOICE_FORCE_SHOW", False)
+
+
 @dataclass
 class AppConfig:
     """Centralized configuration for the OpenWhisper application."""
 
     # File paths
-    SETTINGS_FILE: str = "openwhisper_settings.json"
-    RECORDED_AUDIO_FILE: str = "recorded_audio.wav"
-    LOG_FILE: str = "openwhisper.log"
+    APP_NAME: str = "RomanVoice"
+    APPDATA_DIR: str = field(default_factory=_appdata_dir)
+    LOCAL_APPDATA_DIR: str = field(default_factory=_local_appdata_dir)
+    SETTINGS_FILE: str = field(
+        default_factory=lambda: os.path.join(_appdata_dir(), "config.json")
+    )
+    RECORDED_AUDIO_FILE: str = field(
+        default_factory=lambda: os.path.join(_local_appdata_dir(), "recorded_audio.wav")
+    )
+    LOG_FILE: str = field(
+        default_factory=lambda: os.path.join(_local_appdata_dir(), "romanvoice.log")
+    )
     ENV_FILE: str = ".env"
 
     # Logging configuration
@@ -29,16 +64,26 @@ class AppConfig:
     LOG_BACKUP_COUNT: int = 3
 
     # History and recordings
-    HISTORY_FILE: str = "transcription_history.json"
-    RECORDINGS_FOLDER: str = "recordings"
+    HISTORY_FILE: str = field(
+        default_factory=lambda: os.path.join(_appdata_dir(), "transcription_history.json")
+    )
+    RECORDINGS_FOLDER: str = field(
+        default_factory=lambda: os.path.join(_local_appdata_dir(), "recordings")
+    )
     MAX_SAVED_RECORDINGS: int = 3
-    DATABASE_FILE: str = "openwhisper.db"
+    DATABASE_FILE: str = field(
+        default_factory=lambda: os.path.join(_appdata_dir(), "history.sqlite")
+    )
+    HISTORY_ENABLED: bool = True
+    MAX_HISTORY_ENTRIES: int = 1000
 
     # Audio settings
     CHUNK_SIZE: int = 1024
     AUDIO_FORMAT: type = np.int16  # NumPy dtype for audio format
     CHANNELS: int = 1
     SAMPLE_RATE: int = 44100
+    MIN_MIC_INPUT_PEAK: int = 100
+    PREFER_WASAPI_INPUT: bool = True
 
     # Default hotkeys
     DEFAULT_HOTKEYS: Dict[str, str] = None
@@ -46,9 +91,6 @@ class AppConfig:
     # Model configurations
     MODEL_CHOICES: Tuple[str, ...] = (
         'Local Whisper',
-        'API: Whisper',
-        'API: GPT-4o Transcribe',
-        'API: GPT-4o Mini Transcribe'
     )
 
     MODEL_VALUE_MAP: Dict[str, str] = None
@@ -100,9 +142,15 @@ class AppConfig:
     # Extra silence appended to the end of saved audio so ASR models don't drop the last word
     END_PADDING_MS: int = 500
     # Hotkey watchdog: detects sleep/resume gaps; periodic refresh re-registers the hook
+    ENABLE_GLOBAL_HOTKEYS: bool = _env_bool("ROMANVOICE_ENABLE_GLOBAL_HOTKEYS", True)
+    HOTKEY_BACKEND: str = "win32"
     HOTKEY_WATCHDOG_INTERVAL_MS: int = 10_000
     HOTKEY_SLEEP_GAP_THRESHOLD_SEC: float = 30.0
     HOTKEY_HOOK_REFRESH_INTERVAL_MS: int = 5 * 60 * 1000
+    COMPACT_STATUS_OVERLAY: bool = True
+    COMPACT_OVERLAY_LIVE_PREVIEW: bool = True
+    COMPACT_OVERLAY_POSITION: str = "bottom_center"  # "bottom_center" or "bottom_right"
+    START_HIDDEN_TO_TRAY: bool = field(default_factory=_start_hidden_default)
     # Whisper expects 16 kHz audio regardless of recorder sample rate
     WHISPER_TARGET_SAMPLE_RATE: int = 16000
 
@@ -118,14 +166,47 @@ class AppConfig:
 
     # Faster-whisper settings
     FASTER_WHISPER_DEVICE: str = "auto"  # "auto", "cuda", "cpu"
-    FASTER_WHISPER_COMPUTE_TYPE: str = "auto"  # "auto", "float16", "int8", "float32"
+    FASTER_WHISPER_COMPUTE_TYPE: str = "float16"  # Blackwell-safe GPU default
     FASTER_WHISPER_VAD_ENABLED: bool = True
-    FASTER_WHISPER_VAD_MIN_SILENCE_MS: int = 500
+    FASTER_WHISPER_VAD_MIN_SILENCE_MS: int = 400
     FASTER_WHISPER_BEAM_SIZE: int = 5
+    FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT: bool = True
+    FASTER_WHISPER_INITIAL_PROMPT: str = (
+        "This is English voice dictation. Transcribe with natural punctuation, "
+        "sentence capitalization, and paragraph-like clarity while preserving the "
+        "speaker's wording."
+    )
+    FASTER_WHISPER_LIGHT_CLEANUP: bool = True
+
+    # Text injection settings
+    TEXT_INJECTION_MODE: str = "unicode"  # "unicode" or "clipboard"
+    TEXT_INJECTION_LONG_TEXT_THRESHOLD: int = 5000
+    TEXT_INJECTION_KEY_DELAY_MS: int = 0
+    LIVE_TYPE_ENABLED: bool = True
+
+    # Optional local polishing through an external Ollama install
+    POLISH_ENABLED: bool = False
+    POLISH_MODEL: str = "gemma3:1b"
+    POLISH_WORD_THRESHOLD: int = 30
+    POLISH_TIMEOUT_MS: int = 1500
+    POLISH_OLLAMA_URL: str = "http://127.0.0.1:11434"
+
+    # Cooperative CUDA behavior. Keeps RomanVoice from competing with exports/games.
+    GPU_COOPERATIVE_MODE: bool = True
+    GPU_BUSY_UTILIZATION_THRESHOLD: int = 75
+    GPU_MIN_FREE_MEMORY_MB: int = 2500
+    GPU_QUERY_TIMEOUT_MS: int = 1000
+    GPU_BUSY_RECHECK_MS: int = 1000
+    GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS: int = 30000
+    GPU_BUSY_WARMUP_RETRY_MS: int = 30000
+    GPU_COOPERATIVE_MONITOR_MS: int = 30000
+    GPU_BUSY_SKIP_STREAMING_PREVIEW: bool = True
+    GPU_BUSY_CPU_FALLBACK_MODEL: str = "base"
+    PRELOAD_WHISPER_ON_START: bool = True
 
     # Streaming transcription settings
-    STREAMING_ENABLED: bool = False  # Opt-in feature for real-time transcription
-    STREAMING_CHUNK_DURATION_SEC: float = 3.0  # Process every N seconds
+    STREAMING_ENABLED: bool = True  # Real-time preview while recording
+    STREAMING_CHUNK_DURATION_SEC: float = 2.0  # Process every N seconds
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
 
@@ -135,11 +216,14 @@ class AppConfig:
 
     def __post_init__(self):
         """Initialize computed fields after dataclass creation."""
+        for directory in (self.APPDATA_DIR, self.LOCAL_APPDATA_DIR, self.RECORDINGS_FOLDER):
+            os.makedirs(directory, exist_ok=True)
+
         if self.DEFAULT_HOTKEYS is None:
             self.DEFAULT_HOTKEYS = {
-                'record_toggle': 'kp *',
-                'cancel': 'kp -',
-                'enable_disable': 'ctrl+alt+kp *'
+                'record_toggle': 'ctrl+space',
+                'cancel': 'ctrl+alt+backspace',
+                'enable_disable': 'ctrl+alt+shift+space',
             }
 
         if self.MODEL_VALUE_MAP is None:
@@ -147,7 +231,7 @@ class AppConfig:
                 'Local Whisper': 'local_whisper',
                 'API: Whisper': 'api_whisper',
                 'API: GPT-4o Transcribe': 'api_gpt4o',
-                'API: GPT-4o Mini Transcribe': 'api_gpt4o_mini'
+                'API: GPT-4o Mini Transcribe': 'api_gpt4o_mini',
             }
 
         if self.WHISPER_MODEL_CHOICES is None:

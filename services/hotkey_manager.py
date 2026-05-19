@@ -36,7 +36,7 @@ class HotkeyManager:
 
     def _setup_keyboard_hook(self):
         """Setup the global keyboard hook."""
-        keyboard.hook(self._handle_keyboard_event, suppress=True)
+        keyboard.hook(self._handle_keyboard_event, suppress=False)
 
     def _handle_keyboard_event(self, event):
         """Global keyboard event handler with suppression."""
@@ -53,14 +53,12 @@ class HotkeyManager:
 
             # Check record toggle hotkey
             elif self._matches_hotkey(event, self.hotkeys['record_toggle']):
-                # Always suppress record toggle key first
-                suppress = False
                 if self._should_trigger_record_toggle():
                     if self.on_record_toggle:
                         # Run callback in a separate thread to avoid blocking
                         import threading
                         threading.Thread(target=self.on_record_toggle, daemon=True).start()
-                return False  # Always suppress record toggle key
+                return False
 
             # Check cancel hotkey
             elif self._matches_hotkey(event, self.hotkeys['cancel']):

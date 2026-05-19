@@ -13,6 +13,7 @@ import numpy as np
 from scipy import signal
 from typing import Callable, Optional, List
 from config import config
+from services.gpu_guard import gpu_guard
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class StreamingTranscriber:
         self._chunk_count = 0
         self._slow_chunks = 0
         self._last_warning_time = 0
+        self._last_gpu_skip_log = 0.0
 
         logger.info(f"StreamingTranscriber initialized (chunk_duration={chunk_duration_sec}s)")
 
@@ -185,6 +187,9 @@ class StreamingTranscriber:
             return
 
         try:
+            if self._should_skip_cuda_preview():
+                return
+
             # Start timing
             start_time = time.time()
 
@@ -211,21 +216,26 @@ class StreamingTranscriber:
                 logger.debug(f"Resampled audio from {self.sample_rate}Hz to {config.WHISPER_TARGET_SAMPLE_RATE}Hz")
 
             # Transcribe using faster-whisper model
+            if hasattr(self.backend, "ensure_loaded"):
+                self.backend.ensure_loaded()
+
             segments, info = self.backend.model.transcribe(
                 audio_array,
                 beam_size=config.STREAMING_BEAM_SIZE,
+                condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+                initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
                 vad_filter=False  # Disable VAD for streaming (faster)
             )
 
             # Collect text from all segments
             text_parts = []
             for segment in segments:
-                if self._stop_requested:
-                    break
                 text_parts.append(segment.text)
 
             # Combine segment texts - this is the COMPLETE transcription
             full_text = " ".join(text_parts).strip()
+            if hasattr(self.backend, "_clean_transcript_text"):
+                full_text = self.backend._clean_transcript_text(full_text)
 
             # Update metrics
             processing_time = time.time() - start_time
@@ -251,6 +261,26 @@ class StreamingTranscriber:
 
         except Exception as e:
             logger.error(f"Error in rolling transcription: {e}", exc_info=True)
+
+    def _should_skip_cuda_preview(self) -> bool:
+        """Avoid preview inference while another app is saturating CUDA."""
+        if (
+            not config.GPU_COOPERATIVE_MODE
+            or not config.GPU_BUSY_SKIP_STREAMING_PREVIEW
+            or not getattr(self.backend, "prefers_cuda", False)
+        ):
+            return False
+
+        status = gpu_guard.query_status()
+        busy_reason = status.busy_reason()
+        if not busy_reason:
+            return False
+
+        now = time.time()
+        if now - self._last_gpu_skip_log > 10:
+            logger.info("Skipping live preview; CUDA busy: %s", busy_reason)
+            self._last_gpu_skip_log = now
+        return True
 
     def cleanup(self):
         """Clean up resources and stop streaming."""

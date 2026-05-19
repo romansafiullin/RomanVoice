@@ -128,7 +128,7 @@ def main() -> int:
     setup_logging()
     profiler.mark("logging_ready")
     logging.info("=" * 60)
-    logging.info("Starting OpenWhisper")
+    logging.info("Starting RomanVoice")
     logging.info("=" * 60)
 
     profiler.mark("early_imports_started")
@@ -144,7 +144,8 @@ def main() -> int:
     try:
         loading_screen = LoadingScreen()
         profiler.mark("loading_screen_constructed")
-        loading_screen.show()
+        if not config.START_HIDDEN_TO_TRAY:
+            loading_screen.show()
         profiler.mark("loading_screen_shown")
 
         loading_screen.update_status("Initializing components...")
@@ -176,26 +177,48 @@ def main() -> int:
         profiler.mark("application_controller_created")
 
         local_backend = app_controller.transcription_backends.get("local_whisper")
-        if local_backend and hasattr(local_backend, "device_info"):
+        is_backend_ready = True
+        if local_backend and hasattr(local_backend, "is_available"):
+            is_backend_ready = local_backend.is_available()
+        if (
+            local_backend
+            and hasattr(local_backend, "device_info")
+            and is_backend_ready
+        ):
             device_info = local_backend.device_info
             loading_screen.update_progress(f"Using {device_info}")
             process_qt_events()
             logging.info(f"Whisper device: {device_info}")
+        else:
+            loading_screen.update_progress("Whisper warming in background")
+            process_qt_events()
 
         loading_screen.destroy()
         loading_screen = None
 
-        ui_controller.show_main_window()
+        if config.START_HIDDEN_TO_TRAY:
+            ui_controller.hide_main_window()
+            logging.info("Main window hidden on startup; running from tray")
+        else:
+            ui_controller.show_main_window()
         profiler.mark("main_window_shown")
 
-        if local_backend and hasattr(local_backend, "device_info"):
+        is_backend_ready = True
+        if local_backend and hasattr(local_backend, "is_available"):
+            is_backend_ready = local_backend.is_available()
+        if (
+            local_backend
+            and hasattr(local_backend, "device_info")
+            and is_backend_ready
+        ):
             ui_controller.set_device_info(local_backend.device_info)
 
         profiler.log_summary()
         summary_logged = True
         logging.info("Application initialization complete")
         logging.info("Starting event loop")
-        return qt_app.run(ui_controller.main_window)
+        main_window_for_runner = None if config.START_HIDDEN_TO_TRAY else ui_controller.main_window
+        return qt_app.run(main_window_for_runner)
     except Exception:
         if not summary_logged:
             profiler.log_summary()

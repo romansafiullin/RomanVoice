@@ -36,11 +36,15 @@ class _FakeUIController:
     def __init__(self):
         self.main_window = object()
         self.show_main_window_called = False
+        self.hide_main_window_called = False
         self.device_info = None
         self.cleaned_up = False
 
     def show_main_window(self):
         self.show_main_window_called = True
+
+    def hide_main_window(self):
+        self.hide_main_window_called = True
 
     def set_device_info(self, device_info):
         self.device_info = device_info
@@ -115,10 +119,15 @@ class TestBootstrap(unittest.TestCase):
             bootstrap,
             "get_late_runtime_components",
             side_effect=get_late_runtime_components,
+        ), patch.object(
+            bootstrap.config,
+            "START_HIDDEN_TO_TRAY",
+            False,
         ):
             result = bootstrap.main()
 
         self.assertEqual(result, 123)
+        self.assertIs(qt_app.main_window, ui_controller.main_window)
         self.assertTrue(loading_screen.destroyed)
         self.assertTrue(ui_controller.show_main_window_called)
         self.assertEqual(ui_controller.device_info, "cuda")
@@ -126,6 +135,36 @@ class TestBootstrap(unittest.TestCase):
         self.assertTrue(_FakeApplicationController.instances[0].cleaned_up)
         self.assertLess(order.index("loading_screen_shown"), order.index("late_imports"))
         self.assertLess(order.index("process_events"), order.index("late_imports"))
+
+    @patch.object(bootstrap, "process_qt_events")
+    @patch.object(bootstrap, "setup_logging")
+    def test_main_can_start_hidden_to_tray(
+        self, _mock_setup_logging, _mock_process_events
+    ):
+        qt_app = _FakeQtApplication()
+        ui_controller = _FakeUIController()
+        loading_screen = _FakeLoadingScreen()
+
+        with patch.object(
+            bootstrap,
+            "get_early_runtime_components",
+            return_value=(lambda: qt_app, lambda: loading_screen),
+        ), patch.object(
+            bootstrap,
+            "get_late_runtime_components",
+            return_value=(lambda: ui_controller, _FakeApplicationController),
+        ), patch.object(
+            bootstrap.config,
+            "START_HIDDEN_TO_TRAY",
+            True,
+        ):
+            result = bootstrap.main()
+
+        self.assertEqual(result, 123)
+        self.assertIsNone(qt_app.main_window)
+        self.assertFalse(loading_screen.shown)
+        self.assertFalse(ui_controller.show_main_window_called)
+        self.assertTrue(ui_controller.hide_main_window_called)
 
     @patch.object(bootstrap, "process_qt_events")
     @patch.object(bootstrap, "setup_logging")

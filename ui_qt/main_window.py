@@ -133,7 +133,7 @@ class CustomTitleBar(QFrame):
 
     def _build_title_label(self, layout: QHBoxLayout) -> None:
         """Create the centered application title label."""
-        self.title_label = QLabel("OpenWhisper")
+        self.title_label = QLabel("RomanVoice")
         self.title_label.setStyleSheet(self._TITLE_LABEL_STYLE)
         layout.addWidget(self.title_label)
 
@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         """Initialize the main window."""
         super().__init__()
-        self.setWindowTitle("OpenWhisper")
+        self.setWindowTitle("RomanVoice")
 
         # Frameless window with custom title bar
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)

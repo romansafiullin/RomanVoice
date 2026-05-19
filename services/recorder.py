@@ -7,6 +7,7 @@ import threading
 import logging
 import numpy as np
 import time
+import os
 
 from typing import Callable, List, Optional, Tuple
 from config import config
@@ -36,13 +37,54 @@ class AudioRecorder:
             logger.error(f"Failed to enumerate audio devices: {e}")
         return devices
 
+    @staticmethod
+    def _resolve_input_device(device_id: Optional[int]) -> Optional[int]:
+        """Resolve the input device used for recording.
+
+        When the user chooses "System Default", PortAudio often resolves to an
+        older MME endpoint on Windows. Prefer the matching WASAPI endpoint when
+        present because it is the modern Windows audio path and usually behaves
+        better for desktop dictation.
+        """
+        if device_id is not None or not config.PREFER_WASAPI_INPUT:
+            return device_id
+
+        try:
+            default_input = sd.default.device[0]
+            if default_input is None or default_input < 0:
+                return device_id
+
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+            default_device = devices[default_input]
+            default_name = default_device["name"]
+
+            for index, candidate in enumerate(devices):
+                if candidate.get("max_input_channels", 0) <= 0:
+                    continue
+                hostapi_name = hostapis[candidate["hostapi"]]["name"]
+                if hostapi_name != "Windows WASAPI":
+                    continue
+                if candidate["name"] == default_name:
+                    logger.info(
+                        "Using WASAPI input device %s for default microphone %r",
+                        index,
+                        default_name,
+                    )
+                    return index
+        except Exception as exc:
+            logger.debug(f"Could not resolve WASAPI input device: {exc}")
+
+        return device_id
+
     def __init__(self, device_id: Optional[int] = None):
         """Initialize the audio recorder.
 
         Args:
             device_id: Optional device ID for input. None uses system default.
         """
-        self.device_id = device_id
+        self.requested_device_id = device_id
+        self.device_id = self._resolve_input_device(device_id)
         self.is_recording = False
         self.frames: List[bytes] = []
         self.stream: Optional[sd.InputStream] = None
@@ -50,12 +92,13 @@ class AudioRecorder:
         self._stop_requested: bool = False
         self._post_roll_until: float = 0.0
         self._recording_complete_event = threading.Event()
+        self._stream_started_event = threading.Event()
+        self._stream_error: Optional[str] = None
 
         # Audio settings from config
         self.chunk = config.CHUNK_SIZE
         self.dtype = config.AUDIO_FORMAT
-        self.channels = config.CHANNELS
-        self.rate = config.SAMPLE_RATE
+        self.channels, self.rate = self._resolve_audio_settings()
 
         # Audio level callback
         self.audio_level_callback: Optional[AudioLevelCallback] = None
@@ -70,7 +113,67 @@ class AudioRecorder:
         # Thread safety for callback
         self._callback_lock = threading.Lock()
 
-        logger.info("Audio recorder initialized")
+        logger.info(
+            "Audio recorder initialized (requested_device=%s, resolved_device=%s, channels=%s, rate=%s)",
+            self.requested_device_id,
+            self.device_id,
+            self.channels,
+            self.rate,
+        )
+
+    def _resolve_audio_settings(self) -> Tuple[int, int]:
+        """Resolve channel count and sample rate for the selected input device."""
+        channels = config.CHANNELS
+        rate = config.SAMPLE_RATE
+
+        try:
+            device_info = None
+            if self.device_id is not None:
+                device_info = sd.query_devices(self.device_id)
+            else:
+                default_input = sd.default.device[0]
+                if default_input is not None and default_input >= 0:
+                    device_info = sd.query_devices(default_input)
+
+            if device_info:
+                max_input_channels = int(device_info.get("max_input_channels", channels) or channels)
+                if max_input_channels > 0:
+                    channels = max(1, min(channels, max_input_channels))
+
+                default_samplerate = device_info.get("default_samplerate")
+                if default_samplerate:
+                    rate = int(default_samplerate)
+        except Exception as exc:
+            logger.debug(f"Could not resolve native audio settings: {exc}")
+
+        return channels, rate
+
+    @staticmethod
+    def _initialize_com_for_audio_thread() -> bool:
+        """Initialize COM for Windows audio APIs used inside worker threads."""
+        if os.name != "nt":
+            return False
+
+        try:
+            import ctypes
+
+            coinit_multithreaded = 0x0
+            rpc_e_changed_mode = 0x80010106
+            hr = ctypes.windll.ole32.CoInitializeEx(None, coinit_multithreaded)
+            unsigned_hr = hr & 0xFFFFFFFF
+
+            if hr in (0, 1):  # S_OK or S_FALSE; both require CoUninitialize.
+                return True
+
+            if unsigned_hr == rpc_e_changed_mode:
+                logger.debug("COM already initialized with a different threading model")
+                return False
+
+            logger.debug(f"CoInitializeEx returned HRESULT 0x{unsigned_hr:08x}")
+        except Exception as exc:
+            logger.debug(f"Could not initialize COM for audio thread: {exc}")
+
+        return False
 
     def set_audio_level_callback(self, callback: AudioLevelCallback):
         """Set callback function for real-time audio level updates.
@@ -101,6 +204,8 @@ class AudioRecorder:
         try:
             # Reset completion signal for this session
             self._recording_complete_event = threading.Event()
+            self._stream_started_event = threading.Event()
+            self._stream_error = None
 
             self.clear_recording_data()
 
@@ -120,6 +225,18 @@ class AudioRecorder:
             # Start recording in a separate thread
             self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
             self.recording_thread.start()
+
+            if not self._stream_started_event.wait(timeout=1.5):
+                self._stream_error = "Audio stream did not start within 1.5 seconds"
+
+            if self._stream_error:
+                self.is_recording = False
+                self._stop_requested = True
+                self._recording_complete_event.set()
+                if self.recording_thread and self.recording_thread.is_alive():
+                    self.recording_thread.join(timeout=0.5)
+                logger.error(f"Recording failed to start: {self._stream_error}")
+                return False
 
             logger.info("Recording started - frames cleared, old file removed")
             return True
@@ -208,6 +325,7 @@ class AudioRecorder:
 
     def _record_audio(self):
         """Record audio data in a separate thread until recording is stopped."""
+        com_initialized = self._initialize_com_for_audio_thread()
         try:
             # Create input stream with callback
             self.stream = sd.InputStream(
@@ -221,7 +339,14 @@ class AudioRecorder:
 
             # Start the stream
             self.stream.start()
-            logger.info("Audio stream started")
+            self._stream_started_event.set()
+            logger.info(
+                "Audio stream started (device=%s, channels=%s, rate=%s, blocksize=%s)",
+                self.device_id,
+                self.channels,
+                self.rate,
+                self.chunk,
+            )
 
             # Wait until stop is requested and post-roll window has elapsed
             while True:
@@ -232,6 +357,8 @@ class AudioRecorder:
                     break
 
         except Exception as e:
+            self._stream_error = str(e)
+            self._stream_started_event.set()
             logger.error(f"Error opening audio stream: {e}")
         finally:
             if self.stream:
@@ -245,9 +372,18 @@ class AudioRecorder:
             self.is_recording = False
             self._stop_requested = False
             self._post_roll_until = 0.0
+            self.stream = None
             self.recording_thread = None
             # Signal any waiters that recording is fully finished
             self._recording_complete_event.set()
+
+            if com_initialized:
+                try:
+                    import ctypes
+
+                    ctypes.windll.ole32.CoUninitialize()
+                except Exception as exc:
+                    logger.debug(f"Could not uninitialize COM for audio thread: {exc}")
 
     def _calculate_and_report_level(self, audio_data: np.ndarray):
         """Calculate audio level from numpy audio data and report it via callback.
@@ -360,8 +496,36 @@ class AudioRecorder:
         if not self.frames:
             return 0.0
 
-        total_frames = len(self.frames) * self.chunk
-        return total_frames / self.rate
+        with self._callback_lock:
+            frames_snapshot = list(self.frames)
+
+        bytes_per_sample = np.dtype(self.dtype).itemsize
+        total_bytes = sum(len(frame) for frame in frames_snapshot)
+        if bytes_per_sample <= 0 or self.channels <= 0:
+            return 0.0
+
+        total_samples = total_bytes / (bytes_per_sample * self.channels)
+        return total_samples / self.rate
+
+    def get_recording_signal_metrics(self) -> dict:
+        """Return simple signal metrics for the captured frames."""
+        with self._callback_lock:
+            frames_snapshot = list(self.frames)
+
+        if not frames_snapshot:
+            return {"rms": 0.0, "peak": 0, "samples": 0}
+
+        try:
+            audio = np.frombuffer(b"".join(frames_snapshot), dtype=self.dtype)
+            if audio.size == 0:
+                return {"rms": 0.0, "peak": 0, "samples": 0}
+
+            rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+            peak = int(np.max(np.abs(audio.astype(np.int32))))
+            return {"rms": rms, "peak": peak, "samples": int(audio.size)}
+        except Exception as exc:
+            logger.warning(f"Failed to calculate recording metrics: {exc}")
+            return {"rms": 0.0, "peak": 0, "samples": 0}
 
     def has_recording_data(self) -> bool:
         """Check if there is recorded audio data available.

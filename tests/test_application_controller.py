@@ -74,6 +74,8 @@ class FakeSettingsManager:
             "streaming_chunk_duration": 4.0,
             "copy_clipboard": True,
             "auto_paste": False,
+            "live_type_enabled": True,
+            "text_injection_key_delay_ms": 0,
         }
         self.saved_model_selection = None
         self.saved_hotkeys = None
@@ -133,6 +135,9 @@ class FakeRecorder:
     def get_recording_duration(self):
         return 12.5
 
+    def get_recording_signal_metrics(self):
+        return {"rms": 1000.0, "peak": 1000, "samples": 1000}
+
     def clear_recording_data(self):
         pass
 
@@ -180,27 +185,6 @@ class FakeLocalBackend:
 
     def reload_model(self):
         self.device_info = "cpu-reloaded"
-
-    def cleanup(self):
-        self.cleaned_up = True
-
-
-class FakeOpenAIBackend:
-    requires_file_splitting = True
-
-    def __init__(self, model_type):
-        self.model_type = model_type
-        self.is_transcribing = False
-        self.cleaned_up = False
-
-    def transcribe(self, audio_path):
-        return f"api:{audio_path}"
-
-    def transcribe_chunks(self, chunk_files):
-        return "api chunks"
-
-    def cancel_transcription(self):
-        self.is_transcribing = False
 
     def cleanup(self):
         self.cleaned_up = True
@@ -281,6 +265,33 @@ class FakePyperclip:
 
     def copy(self, text):
         self.copied.append(text)
+
+
+class FakeTextInjector:
+    def __init__(self):
+        self.live_updates = []
+        self.injections = []
+        self.live_result = types.SimpleNamespace(
+            success=True, method="live_unicode", error=None
+        )
+        self.inject_result = None
+
+    def update_live_text(self, previous_text, next_text, *, key_delay_ms=0):
+        self.live_updates.append((previous_text, next_text, key_delay_ms))
+        return self.live_result
+
+    def inject(
+        self,
+        text,
+        *,
+        mode="unicode",
+        key_delay_ms=0,
+        long_text_threshold=5000,
+    ):
+        self.injections.append((text, mode, key_delay_ms, long_text_threshold))
+        if self.inject_result is not None:
+            return self.inject_result
+        return types.SimpleNamespace(success=True, method=mode, error=None)
 
 
 class DummyOverlay:
@@ -384,7 +395,7 @@ class DummyUIController:
         self.cleaned_up = True
 
 
-def _install_module_stubs(settings_manager, history_manager, audio_processor, keyboard, pyperclip, db_state):
+def _install_module_stubs(settings_manager, history_manager, audio_processor, keyboard, pyperclip, text_injector, db_state):
     qtcore_module = types.ModuleType("PyQt6.QtCore")
     qtcore_module.QObject = _QObject
     qtcore_module.QTimer = _QTimer
@@ -396,7 +407,6 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
     transcriber_module = types.ModuleType("transcriber")
     transcriber_module.TranscriptionBackend = object
     transcriber_module.LocalWhisperBackend = FakeLocalBackend
-    transcriber_module.OpenAIBackend = FakeOpenAIBackend
 
     recorder_module = types.ModuleType("services.recorder")
     recorder_module.AudioRecorder = FakeRecorder
@@ -427,6 +437,9 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
     pyperclip_module = types.ModuleType("pyperclip")
     pyperclip_module.copy = pyperclip.copy
 
+    text_injector_module = types.ModuleType("services.text_injector")
+    text_injector_module.text_injector = text_injector
+
     return {
         "PyQt6": pyqt_module,
         "PyQt6.QtCore": qtcore_module,
@@ -440,6 +453,7 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
         "services.database": database_module,
         "keyboard": keyboard_module,
         "pyperclip": pyperclip_module,
+        "services.text_injector": text_injector_module,
     }
 
 
@@ -450,6 +464,7 @@ class TestApplicationController(unittest.TestCase):
         self.audio_processor = FakeAudioProcessor()
         self.keyboard = FakeKeyboard()
         self.pyperclip = FakePyperclip()
+        self.text_injector = FakeTextInjector()
         self.db_state = {"closed": False}
 
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -462,6 +477,7 @@ class TestApplicationController(unittest.TestCase):
             self.audio_processor,
             self.keyboard,
             self.pyperclip,
+            self.text_injector,
             self.db_state,
         )
         self.module_patcher = patch.dict(sys.modules, module_stubs)
@@ -497,13 +513,8 @@ class TestApplicationController(unittest.TestCase):
         controller.executor = FakeExecutor()
         return controller
 
-    def test_model_switch_updates_backend_and_device_info(self):
+    def test_local_model_switch_updates_backend_and_device_info(self):
         controller = self._create_controller()
-
-        controller.on_model_changed("API: GPT-4o Transcribe")
-        self.assertEqual(controller._current_model_name, "api_gpt4o")
-        self.assertEqual(self.settings.saved_model_selection, "api_gpt4o")
-        self.assertEqual(controller.ui_controller.device_infos[-1], "")
 
         controller.on_model_changed("Local Whisper")
         self.assertEqual(controller._current_model_name, "local_whisper")
@@ -532,20 +543,20 @@ class TestApplicationController(unittest.TestCase):
             controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
         )
 
-        controller.executor = FakeExecutor()
-        controller.current_backend = controller.transcription_backends["api_gpt4o"]
+    def test_stop_recording_continues_when_microphone_signal_is_quiet(self):
+        controller = self._create_controller()
         controller.recorder.is_recording = True
-        self.audio_processor.check_result = (True, 30.0)
+        controller.recorder.get_recording_signal_metrics = lambda: {
+            "rms": 1.4,
+            "peak": 18,
+            "samples": 1000,
+        }
+
         controller.stop_recording()
+
         self.assertEqual(len(controller.executor.submissions), 1)
         self.assertEqual(
-            controller.executor.submissions[0][0].__name__,
-            "transcribe_large_audio_file",
-        )
-        self.assertEqual(controller.ui_controller.overlay.large_file_info, 30.0)
-        self.assertIn(
-            controller.ui_controller.overlay.STATE_LARGE_FILE_SPLITTING,
-            controller.ui_controller.overlay.shown_states,
+            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
         )
 
     def test_transcription_complete_saves_history_and_resets_pending_state(self):
@@ -565,9 +576,77 @@ class TestApplicationController(unittest.TestCase):
         self.assertEqual(entry["file_size"], 2048)
         self.assertTrue(controller.ui_controller.refreshed_history)
         self.assertEqual(self.pyperclip.copied[-1], "hello world")
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            ("", "hello world", 0),
+        )
         self.assertIsNone(controller._pending_audio_path)
         self.assertIsNone(controller._pending_audio_duration)
         self.assertIsNone(controller._pending_file_size)
+
+    def test_transcription_complete_uses_streaming_fallback_and_copies_clipboard(self):
+        controller = self._create_controller()
+        controller._last_streaming_text = "streaming fallback"
+
+        controller._on_transcription_complete("")
+
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], "streaming fallback")
+        self.assertEqual(self.pyperclip.copied[-1], "streaming fallback")
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            ("", "streaming fallback", 0),
+        )
+
+    def test_transcription_complete_injects_final_text_when_live_type_has_no_prior_text(self):
+        controller = self._create_controller()
+        self.text_injector.live_result = types.SimpleNamespace(
+            success=False,
+            method="live_unicode",
+            error="SendInput sent 0/2 events; error=87",
+        )
+
+        controller._on_transcription_complete("final text")
+
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            ("", "final text", 0),
+        )
+        self.assertEqual(
+            self.text_injector.injections[-1],
+            ("final text", "unicode", 0, 5000),
+        )
+        self.assertEqual(self.pyperclip.copied[-1], "final text")
+        self.assertIn("Ready (Pasted)", controller.ui_controller.statuses)
+
+    def test_transcription_complete_does_not_duplicate_when_live_reconcile_fails_after_typing(self):
+        controller = self._create_controller()
+        controller._live_typed_text = "partial text"
+        self.text_injector.live_result = types.SimpleNamespace(
+            success=False,
+            method="live_unicode",
+            error="target rejected input",
+        )
+
+        controller._on_transcription_complete("partial text finished")
+
+        self.assertEqual(self.text_injector.injections, [])
+        self.assertIn(
+            "Transcription complete (text injection failed)",
+            controller.ui_controller.statuses,
+        )
+
+    def test_streaming_partial_live_types_into_focused_control(self):
+        controller = self._create_controller()
+
+        controller.streaming_runtime.on_partial_transcription("draft text", True)
+
+        self.assertEqual(controller._last_streaming_text, "draft text")
+        self.assertEqual(controller._live_typed_text, "draft text")
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            ("", "draft text", 0),
+        )
 
     def test_cleanup_is_safe_with_partial_state(self):
         controller = self._create_controller()
