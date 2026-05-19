@@ -2,6 +2,7 @@
 Configuration constants for the OpenWhisper application.
 """
 import os
+import secrets
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
@@ -33,9 +34,59 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
 def _start_hidden_default() -> bool:
     # The full window should only appear from an explicit UI/debug launcher.
     return not _env_bool("ROMANVOICE_FORCE_SHOW", False)
+
+
+def _service_token_file() -> str:
+    return os.environ.get(
+        "ROMANVOICE_SERVICE_TOKEN_FILE",
+        os.path.join(_appdata_dir(), "service_token.txt"),
+    )
+
+
+def _service_token_default() -> str:
+    token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
+    if token:
+        return token
+
+    token_file = _service_token_file()
+    try:
+        if os.path.exists(token_file):
+            token = open(token_file, "r", encoding="utf-8").read().strip()
+            if token:
+                return token
+    except OSError:
+        pass
+
+    return ""
+
+
+def ensure_service_token() -> str:
+    if config.SERVICE_TOKEN:
+        return config.SERVICE_TOKEN
+
+    token = secrets.token_urlsafe(32)
+    try:
+        os.makedirs(os.path.dirname(config.SERVICE_TOKEN_FILE), exist_ok=True)
+        with open(config.SERVICE_TOKEN_FILE, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+    except OSError:
+        # The service will still require this in-memory token for the current run.
+        pass
+    config.SERVICE_TOKEN = token
+    return token
 
 
 @dataclass
@@ -142,6 +193,10 @@ class AppConfig:
     POST_ROLL_FINALIZE_GRACE_MS: int = 800
     # Extra silence appended to the end of saved audio so ASR models don't drop the last word
     END_PADDING_MS: int = 500
+    AUTO_STOP_ON_SILENCE: bool = True
+    AUTO_STOP_SILENCE_SECONDS: float = 15.0
+    AUTO_STOP_SPEECH_LEVEL_THRESHOLD: float = 0.0025
+    AUTO_STOP_CHECK_INTERVAL_MS: int = 500
     # Hotkey watchdog: detects sleep/resume gaps; periodic refresh re-registers the hook
     ENABLE_GLOBAL_HOTKEYS: bool = _env_bool("ROMANVOICE_ENABLE_GLOBAL_HOTKEYS", True)
     HOTKEY_BACKEND: str = "win32"
@@ -209,6 +264,14 @@ class AppConfig:
     GPU_BUSY_SKIP_STREAMING_PREVIEW: bool = True
     GPU_BUSY_CPU_FALLBACK_MODEL: str = "base"
     PRELOAD_WHISPER_ON_START: bool = True
+
+    # Local dictation service for PA v2 and future clients.
+    SERVICE_ENABLED: bool = _env_bool("ROMANVOICE_SERVICE_ENABLED", True)
+    SERVICE_HOST: str = os.environ.get("ROMANVOICE_SERVICE_HOST", "127.0.0.1")
+    SERVICE_PORT: int = _env_int("ROMANVOICE_SERVICE_PORT", 8799)
+    SERVICE_TOKEN_FILE: str = field(default_factory=_service_token_file)
+    SERVICE_TOKEN: str = field(default_factory=_service_token_default)
+    SERVICE_MAX_AUDIO_MB: int = _env_int("ROMANVOICE_SERVICE_MAX_AUDIO_MB", 25)
 
     # Streaming transcription settings
     STREAMING_ENABLED: bool = True  # Real-time transcription while recording

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RomanVoice IME</string>
+    <string name="ime_name">RomanVoice</string>
+    <string name="settings_title">RomanVoice Settings</string>
+</resources>

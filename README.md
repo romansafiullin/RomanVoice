@@ -44,8 +44,33 @@ Runtime data is stored under app-data paths:
 
 - `%APPDATA%\RomanVoice\config.json`
 - `%APPDATA%\RomanVoice\history.sqlite`
+- `%APPDATA%\RomanVoice\service_token.txt`
 - `%LOCALAPPDATA%\RomanVoice\recordings`
 - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
+
+RomanVoice also starts a loopback-only dictation service from the same
+tray/background process. It is intended for Roman PA v2 and future trusted local
+clients, so the loaded Whisper model stays owned by one process. The default
+service URL is `http://127.0.0.1:8799`, and `/v1/transcribe` requires
+`Authorization: Bearer <token>`. The token is read from
+`ROMANVOICE_SERVICE_TOKEN` when set, otherwise RomanVoice creates and reuses
+`%APPDATA%\RomanVoice\service_token.txt`.
+
+The same service exposes `GET /v1/transcribe/stream` as an authenticated
+WebSocket endpoint for live clients such as the Android IME in
+`clients/android-ime`. Streaming clients send PCM16 mono chunks after a JSON
+`start` message; RomanVoice sends replacement `partial` messages and a `final`
+message after `stop`.
+
+Useful service environment overrides:
+
+```powershell
+ROMANVOICE_SERVICE_ENABLED=true
+ROMANVOICE_SERVICE_HOST=127.0.0.1
+ROMANVOICE_SERVICE_PORT=8799
+ROMANVOICE_SERVICE_TOKEN_FILE=%APPDATA%\RomanVoice\service_token.txt
+ROMANVOICE_SERVICE_MAX_AUDIO_MB=25
+```
 
 Text insertion defaults to Windows `SendInput` Unicode typing. Clipboard copy is
 available as an opt-in setting, and clipboard paste is only a fallback for long

@@ -3,8 +3,8 @@
 RomanVoice is a local-first Windows dictation app forked from OpenWhisper. The
 product goal is a hidden, hotkey-first dictation loop: press `Ctrl+Space`, speak
 into the selected microphone, transcribe locally with Faster-Whisper, insert the
-result into the focused Windows text field, and copy the final transcript to the
-clipboard.
+result into the focused Windows text field, and keep clipboard copy available as
+an opt-in behavior.
 
 This file is for coding agents working in this repository. Keep changes aligned
 with the current Windows desktop shape unless Roman explicitly approves a new
@@ -37,8 +37,17 @@ product or architecture direction.
 - Durable app data belongs outside the repo:
   - `%APPDATA%\RomanVoice\config.json`
   - `%APPDATA%\RomanVoice\history.sqlite`
+  - `%APPDATA%\RomanVoice\service_token.txt`
   - `%LOCALAPPDATA%\RomanVoice\recordings`
   - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
+- The tray/background app owns the local dictation service on
+  `127.0.0.1:8799` by default. Keep the service authenticated with a bearer
+  token and in-process with the tray app unless Roman approves a different
+  ownership model.
+- The service exposes `POST /v1/transcribe` for batch audio and
+  `GET /v1/transcribe/stream` for authenticated WebSocket streaming. Streaming
+  clients send PCM16 mono chunks and receive replacement partials plus a final
+  transcript.
 - The known preferred microphone path is the WASAPI default resolving to
   `Microphone (3- Razer Kiyo)` when that device is present.
 - The currently working startup fallback is the Startup-folder VBS watchdog:

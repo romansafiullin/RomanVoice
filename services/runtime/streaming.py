@@ -45,6 +45,8 @@ class StreamingRuntime:
         def audio_level_callback(level: float) -> None:
             levels = [level] * 20
             self.controller.ui_controller.update_audio_levels(levels)
+            if hasattr(self.controller, "note_recording_audio_level"):
+                self.controller.note_recording_audio_level(level)
 
         callback: AudioLevelCallback = audio_level_callback
         self.controller.recorder.set_audio_level_callback(callback)
@@ -70,6 +72,8 @@ class StreamingRuntime:
     def on_partial_transcription(self, text: str, is_final: bool) -> None:
         """Handle partial transcription from the streaming worker."""
         self.controller._last_streaming_text = text or ""
+        if text:
+            self.controller.note_voice_activity()
         self._type_live_update(text or "")
         self.controller.partial_transcription.emit(text, is_final)
         if self.controller._streaming_paste_enabled and text:
@@ -161,6 +165,7 @@ class StreamingRuntime:
                 self.controller.streaming_transcriber = StreamingTranscriber(
                     backend=streaming_backend,
                     chunk_duration_sec=chunk_duration,
+                    transcription_lock=self.controller._transcription_lock,
                 )
                 logger.info(
                     "Streaming transcription enabled "

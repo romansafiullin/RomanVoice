@@ -6,13 +6,14 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, RLock
 from typing import Dict, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from config import config
 from services.database import db
+from services.dictation_service import RomanVoiceDictationService
 from services.recorder import AudioRecorder
 from services.runtime import (
     HotkeyRuntime,
@@ -56,6 +57,8 @@ class ApplicationController(QObject):
         self._streaming_backend = None
         self._cpu_fallback_backend = None
         self._shutdown_requested = Event()
+        self._transcription_lock = RLock()
+        self.dictation_service = None
 
         self.transcription_backends: Dict[str, TranscriptionBackend] = {}
         self.current_backend: Optional[TranscriptionBackend] = None
@@ -69,6 +72,9 @@ class ApplicationController(QObject):
         self._live_typing_failed = False
         self._last_gpu_unload_time = 0.0
         self._last_gpu_warmup_defer_log_time = 0.0
+        self._silence_auto_stop_started_at = 0.0
+        self._last_voice_activity_time = 0.0
+        self._silence_auto_stop_triggered = False
 
         self._pending_audio_path: Optional[str] = None
         self._pending_audio_duration: Optional[float] = None
@@ -85,11 +91,21 @@ class ApplicationController(QObject):
         self.hotkey_runtime.setup_hotkeys()
         self.streaming_runtime.setup_audio_level_callback()
         self.streaming_runtime.setup_streaming()
+        self._start_dictation_service()
         self._connect_signals()
         self._setup_gpu_cooperation_monitor()
+        self._setup_silence_auto_stop_monitor()
         if config.PRELOAD_WHISPER_ON_START:
             self._preload_local_whisper_async()
         self.hotkey_runtime.setup_hook_watchdog()
+
+    def _start_dictation_service(self) -> None:
+        try:
+            self.dictation_service = RomanVoiceDictationService(self)
+            self.dictation_service.start()
+        except Exception as exc:
+            self.dictation_service = None
+            logger.warning("Failed to start RomanVoice dictation service: %s", exc)
 
     def _setup_transcription_backends(self) -> None:
         """Initialize transcription backends."""
@@ -155,6 +171,62 @@ class ApplicationController(QObject):
         self._gpu_coop_timer = QTimer()
         self._gpu_coop_timer.timeout.connect(self._on_gpu_cooperation_tick)
         self._gpu_coop_timer.start(config.GPU_COOPERATIVE_MONITOR_MS)
+
+    def _setup_silence_auto_stop_monitor(self) -> None:
+        """Monitor active recordings and stop after sustained silence."""
+        if not config.AUTO_STOP_ON_SILENCE:
+            self._silence_auto_stop_timer = None
+            return
+
+        self._silence_auto_stop_timer = QTimer()
+        self._silence_auto_stop_timer.timeout.connect(
+            self._on_silence_auto_stop_tick
+        )
+        self._silence_auto_stop_timer.start(config.AUTO_STOP_CHECK_INTERVAL_MS)
+
+    def start_silence_auto_stop_monitor(self) -> None:
+        now = time.monotonic()
+        self._silence_auto_stop_started_at = now
+        self._last_voice_activity_time = now
+        self._silence_auto_stop_triggered = False
+
+    def stop_silence_auto_stop_monitor(self) -> None:
+        self._silence_auto_stop_started_at = 0.0
+        self._last_voice_activity_time = 0.0
+
+    def note_voice_activity(self) -> None:
+        if self.recorder.is_recording and not self._silence_auto_stop_triggered:
+            self._last_voice_activity_time = time.monotonic()
+
+    def note_recording_audio_level(self, level: float) -> None:
+        if level >= config.AUTO_STOP_SPEECH_LEVEL_THRESHOLD:
+            self.note_voice_activity()
+
+    def _on_silence_auto_stop_tick(self) -> None:
+        if (
+            not config.AUTO_STOP_ON_SILENCE
+            or not self.recorder.is_recording
+            or self._silence_auto_stop_triggered
+            or self._silence_auto_stop_started_at <= 0
+        ):
+            return
+
+        now = time.monotonic()
+        last_activity = max(
+            self._last_voice_activity_time,
+            self._silence_auto_stop_started_at,
+        )
+        silence_for = now - last_activity
+        if silence_for < config.AUTO_STOP_SILENCE_SECONDS:
+            return
+
+        self._silence_auto_stop_triggered = True
+        logger.info(
+            "Auto-stopping recording after %.1fs without speech",
+            silence_for,
+        )
+        self.status_update.emit("No speech detected; stopping...")
+        self.stop_recording()
 
     def _on_gpu_cooperation_tick(self) -> None:
         local_backend = self.transcription_backends.get("local_whisper")
@@ -362,12 +434,21 @@ class ApplicationController(QObject):
             logger.debug(f"Error canceling transcription: {exc}")
 
         try:
+            if self.dictation_service:
+                self.dictation_service.stop()
+                self.dictation_service = None
+        except Exception as exc:
+            logger.debug(f"Error stopping dictation service: {exc}")
+
+        try:
             if hasattr(self, "_watchdog_timer") and self._watchdog_timer:
                 self._watchdog_timer.stop()
             if hasattr(self, "_periodic_refresh_timer") and self._periodic_refresh_timer:
                 self._periodic_refresh_timer.stop()
             if hasattr(self, "_gpu_coop_timer") and self._gpu_coop_timer:
                 self._gpu_coop_timer.stop()
+            if hasattr(self, "_silence_auto_stop_timer") and self._silence_auto_stop_timer:
+                self._silence_auto_stop_timer.stop()
         except Exception as exc:
             logger.debug(f"Error stopping watchdog timers: {exc}")
 

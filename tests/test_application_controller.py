@@ -200,9 +200,10 @@ class FakeLocalBackend:
 
 
 class FakeStreamingTranscriber:
-    def __init__(self, backend, chunk_duration_sec):
+    def __init__(self, backend, chunk_duration_sec, **kwargs):
         self.backend = backend
         self.chunk_duration_sec = chunk_duration_sec
+        self.transcription_lock = kwargs.get("transcription_lock")
         self.cleaned_up = False
         self.started = False
 
@@ -424,6 +425,23 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
     hotkey_module.HotkeyManager = FakeHotkeyManager
 
     settings_module = types.ModuleType("services.settings")
+    settings_module.SettingsKey = types.SimpleNamespace(
+        AUTO_PASTE="auto_paste",
+        COPY_CLIPBOARD="copy_clipboard",
+        TEXT_INJECTION_MODE="text_injection_mode",
+        TEXT_INJECTION_KEY_DELAY_MS="text_injection_key_delay_ms",
+        TEXT_INJECTION_LONG_TEXT_THRESHOLD="text_injection_long_text_threshold",
+        LIVE_TYPE_ENABLED="live_type_enabled",
+        POLISH_ENABLED="polish_enabled",
+        POLISH_MODEL="polish_model",
+        POLISH_WORD_THRESHOLD="polish_word_threshold",
+        POLISH_TIMEOUT_MS="polish_timeout_ms",
+        POLISH_OLLAMA_URL="polish_ollama_url",
+        STREAMING_ENABLED="streaming_enabled",
+        STREAMING_CHUNK_DURATION="streaming_chunk_duration",
+        STREAMING_PASTE_ENABLED="streaming_paste_enabled",
+        STREAMING_TINY_MODEL_ENABLED="streaming_tiny_model_enabled",
+    )
     settings_module.settings_manager = settings_manager
 
     history_module = types.ModuleType("services.history_manager")
@@ -664,6 +682,34 @@ class TestApplicationController(unittest.TestCase):
             self.text_injector.live_updates[-1],
             ("", "draft text", 0),
         )
+
+    def test_audio_level_marks_voice_activity_for_silence_auto_stop(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+        controller.start_silence_auto_stop_monitor()
+        old_activity_time = time.monotonic() - 20
+        controller._last_voice_activity_time = old_activity_time
+
+        controller.recorder.audio_level_callback(
+            config.AUTO_STOP_SPEECH_LEVEL_THRESHOLD
+        )
+
+        self.assertGreater(controller._last_voice_activity_time, old_activity_time)
+
+    def test_silence_auto_stop_triggers_normal_stop_flow(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+        controller.start_silence_auto_stop_monitor()
+        stale_time = time.monotonic() - config.AUTO_STOP_SILENCE_SECONDS - 1
+        controller._silence_auto_stop_started_at = stale_time
+        controller._last_voice_activity_time = stale_time
+        stop_calls = []
+        controller.stop_recording = lambda: stop_calls.append(True)
+
+        controller._on_silence_auto_stop_tick()
+
+        self.assertEqual(stop_calls, [True])
+        self.assertTrue(controller._silence_auto_stop_triggered)
 
     def test_gpu_monitor_unloads_loaded_cuda_backend_when_busy(self):
         controller = self._create_controller()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pyperclip
@@ -57,6 +58,7 @@ class TranscriptionRuntime:
             self.controller._live_typing_failed = False
             self.controller.ui_controller.clear_transcription_stats()
             self.controller.ui_controller.main_window.clear_partial_transcription()
+            self.controller.start_silence_auto_stop_monitor()
             self.controller.streaming_runtime.start_streaming_session()
             self.controller.recording_state_changed.emit(True)
             self.controller.overlay_state_update.emit(OverlayState.RECORDING)
@@ -67,6 +69,8 @@ class TranscriptionRuntime:
 
     def stop_recording(self) -> None:
         """Stop audio recording and start transcription."""
+        self.controller.stop_silence_auto_stop_monitor()
+
         if self.controller._streaming_paste_enabled:
             self.controller.streaming_overlay_hide.emit()
             settings = settings_manager.load_all_settings()
@@ -178,6 +182,7 @@ class TranscriptionRuntime:
 
     def _cancel_recording(self) -> None:
         """Discard the active recording without transcribing."""
+        self.controller.stop_silence_auto_stop_monitor()
         self.controller.streaming_runtime.cancel_streaming_session()
         self.controller.recording_state_changed.emit(False)
         self.controller.recorder.stop_recording()
@@ -252,16 +257,18 @@ class TranscriptionRuntime:
             self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
             self.controller.status_update.emit("Transcribing...")
             self.controller._transcription_start_time = time.time()
-            backend = self._select_backend_for_transcription()
-            self.controller._active_transcription_backend = backend
-            transcript = backend.transcribe(audio_path)
-            if not transcript.strip() and self.controller._last_streaming_text.strip():
-                transcript = self.controller._last_streaming_text.strip()
-                logger.info(
-                    "Using streaming transcript fallback after empty final pass (%s chars)",
-                    len(transcript),
-                )
-            transcript = self._maybe_polish_transcript(transcript)
+            lock = getattr(self.controller, "_transcription_lock", None)
+            with lock if lock is not None else nullcontext():
+                backend = self._select_backend_for_transcription()
+                self.controller._active_transcription_backend = backend
+                transcript = backend.transcribe(audio_path)
+                if not transcript.strip() and self.controller._last_streaming_text.strip():
+                    transcript = self.controller._last_streaming_text.strip()
+                    logger.info(
+                        "Using streaming transcript fallback after empty final pass (%s chars)",
+                        len(transcript),
+                    )
+                transcript = self._maybe_polish_transcript(transcript)
             if self._is_current_job(job_id):
                 self.controller.transcription_completed.emit(transcript)
             else:
@@ -289,33 +296,35 @@ class TranscriptionRuntime:
             if not chunk_files:
                 raise Exception("Failed to split audio file")
 
-            backend = self._select_backend_for_transcription()
-            self.controller._active_transcription_backend = backend
+            lock = getattr(self.controller, "_transcription_lock", None)
+            with lock if lock is not None else nullcontext():
+                backend = self._select_backend_for_transcription()
+                self.controller._active_transcription_backend = backend
 
-            if hasattr(backend, "transcribe_chunks"):
-                self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
-                self.controller.status_update.emit(
-                    f"Transcribing {len(chunk_files)} chunks..."
-                )
-                transcript = backend.transcribe_chunks(chunk_files)
-            else:
-                transcripts = []
-                for index, chunk_file in enumerate(chunk_files):
+                if hasattr(backend, "transcribe_chunks"):
                     self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
                     self.controller.status_update.emit(
-                        f"Transcribing chunk {index + 1}/{len(chunk_files)}..."
+                        f"Transcribing {len(chunk_files)} chunks..."
                     )
-                    transcripts.append(backend.transcribe(chunk_file))
-                transcript = audio_processor.combine_transcriptions(transcripts)
+                    transcript = backend.transcribe_chunks(chunk_files)
+                else:
+                    transcripts = []
+                    for index, chunk_file in enumerate(chunk_files):
+                        self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
+                        self.controller.status_update.emit(
+                            f"Transcribing chunk {index + 1}/{len(chunk_files)}..."
+                        )
+                        transcripts.append(backend.transcribe(chunk_file))
+                    transcript = audio_processor.combine_transcriptions(transcripts)
 
-            if not transcript.strip() and self.controller._last_streaming_text.strip():
-                transcript = self.controller._last_streaming_text.strip()
-                logger.info(
-                    "Using streaming transcript fallback after empty large final pass (%s chars)",
-                    len(transcript),
-                )
+                if not transcript.strip() and self.controller._last_streaming_text.strip():
+                    transcript = self.controller._last_streaming_text.strip()
+                    logger.info(
+                        "Using streaming transcript fallback after empty large final pass (%s chars)",
+                        len(transcript),
+                    )
 
-            transcript = self._maybe_polish_transcript(transcript)
+                transcript = self._maybe_polish_transcript(transcript)
             if self._is_current_job(job_id):
                 self.controller.transcription_completed.emit(transcript)
             else:
