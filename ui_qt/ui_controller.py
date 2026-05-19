@@ -47,7 +47,9 @@ class UIController(QObject):
         self.main_window = MainWindow()
         self.overlay = WaveformOverlay()
         self.compact_status_overlay = CompactStatusOverlay()
-        self.caret_preview_overlay = CaretPreviewOverlay()
+        self.caret_preview_overlay = (
+            CaretPreviewOverlay() if config.COMPACT_OVERLAY_LIVE_PREVIEW else None
+        )
         self.streaming_overlay = StreamingTextOverlay()
         self.caret_paste_indicator = CaretPasteIndicator()
         self.tray_manager = SystemTrayManager(self.main_window)
@@ -331,7 +333,7 @@ class UIController(QObject):
         if state is OverlayState.NONE:
             self.tray_manager.set_recording(False)
             self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_IDLE)
-            self.caret_preview_overlay.hide_preview()
+            self._hide_caret_preview()
             self.hide_streaming_overlay()
             self.hide_caret_paste_indicator()
             self.streaming_flow_active = False
@@ -343,14 +345,14 @@ class UIController(QObject):
         elif state is OverlayState.PROCESSING:
             self.tray_manager.set_recording(False)
             self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_PROCESSING)
-            self.caret_preview_overlay.hide_preview()
+            self._hide_caret_preview()
         elif state is OverlayState.TRANSCRIBING:
             self.tray_manager.set_recording(False)
             self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_TRANSCRIBING)
         elif state is OverlayState.CANCELING:
             self.tray_manager.set_recording(False)
             self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_CANCELING)
-            self.caret_preview_overlay.hide_preview()
+            self._hide_caret_preview()
             self.streaming_flow_active = False
         elif state is OverlayState.STT_ENABLED:
             self.compact_status_overlay.set_status(CompactStatusOverlay.STATE_ENABLED)
@@ -396,11 +398,17 @@ class UIController(QObject):
         """Update live preview text in the compact dictation overlay."""
         if not config.COMPACT_STATUS_OVERLAY or not config.COMPACT_OVERLAY_LIVE_PREVIEW:
             return
+        if not self.caret_preview_overlay:
+            return
         shown_at_caret = self.caret_preview_overlay.set_preview_text(text)
         if shown_at_caret:
             self.compact_status_overlay.set_preview_text("")
         else:
             self.compact_status_overlay.set_preview_text(text)
+
+    def _hide_caret_preview(self) -> None:
+        if self.caret_preview_overlay:
+            self.caret_preview_overlay.hide_preview()
 
     def hide_streaming_overlay(self):
         """Hide the streaming text overlay with animation."""
@@ -608,7 +616,7 @@ class UIController(QObject):
             logger.debug(f"Error closing compact status overlay: {e}")
 
         try:
-            if hasattr(self, 'caret_preview_overlay'):
+            if self.caret_preview_overlay:
                 self.caret_preview_overlay.hide_preview()
                 self.caret_preview_overlay.close()
         except Exception as e:

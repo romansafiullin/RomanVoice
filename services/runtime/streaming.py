@@ -127,8 +127,9 @@ class StreamingRuntime:
             self.controller._streaming_enabled = settings.get(
                 SettingsKey.STREAMING_ENABLED, config.STREAMING_ENABLED
             )
-            self.controller._streaming_paste_enabled = settings.get(
-                SettingsKey.STREAMING_PASTE_ENABLED, False
+            self.controller._streaming_paste_enabled = (
+                config.STREAMING_TEXT_OVERLAY_ENABLED
+                and settings.get(SettingsKey.STREAMING_PASTE_ENABLED, False)
             )
             streaming_tiny_enabled = settings.get(SettingsKey.STREAMING_TINY_MODEL_ENABLED, False)
 

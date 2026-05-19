@@ -113,8 +113,8 @@ A desktop app for recording audio and transcribing it to text using local Whispe
 - **Transcription History** – Browse past transcriptions with search/filter, retranscribe recordings
 - **Audio Upload** – Import existing audio files for transcription
 - **Real-time Visualization** – Animated waveform overlay shows recording status
-- **Live Streaming** *(experimental)* – Real-time transcription preview while recording
-- **Caret Indicator** *(experimental)* – Visual marker at cursor location when pasting
+- **Live Typing** *(experimental)* – Real-time transcription directly into the focused field while recording
+- **Caret Indicator** *(experimental)* – Visual marker at cursor location when using paste fallback
 - **Window Memory** – Remembers window position and size between sessions
 
 ## GPU Acceleration
@@ -222,13 +222,13 @@ All hotkeys can be remapped in the settings.
 
 Access settings via **File > Settings** or the system tray menu. Available options:
 
-**General:** Default model, auto-paste, clipboard copy, minimize to tray, streaming transcription (experimental)
+**General:** Default model, active-field insertion, clipboard copy, minimize to tray, live typing (experimental)
 
 **Audio:** Sample rate, channels, silence threshold, input device selection
 
 **Hotkeys:** Customize all keyboard shortcuts
 
-**Advanced:** Whisper model selection (14+ options), compute device (auto/cuda/cpu), compute type (float16/float32/int8), max file size before splitting, streaming overlay positioning, logging
+**Advanced:** Whisper model selection (14+ options), compute device (auto/cuda/cpu), compute type (float16/float32/int8), max file size before splitting, logging
 
 ## Offline Usage
 

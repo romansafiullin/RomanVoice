@@ -124,6 +124,7 @@ class AppConfig:
     WAVEFORM_TEXT_COLOR: str = "#ffffff"
 
     # Streaming text overlay settings
+    STREAMING_TEXT_OVERLAY_ENABLED: bool = False
     STREAMING_OVERLAY_WIDTH: int = 450
     STREAMING_OVERLAY_MIN_HEIGHT: int = 100
     STREAMING_OVERLAY_MAX_HEIGHT: int = 300
@@ -148,7 +149,8 @@ class AppConfig:
     HOTKEY_SLEEP_GAP_THRESHOLD_SEC: float = 30.0
     HOTKEY_HOOK_REFRESH_INTERVAL_MS: int = 5 * 60 * 1000
     COMPACT_STATUS_OVERLAY: bool = True
-    COMPACT_OVERLAY_LIVE_PREVIEW: bool = True
+    # Direct typing is the primary feedback surface; avoid a duplicate transcript popup.
+    COMPACT_OVERLAY_LIVE_PREVIEW: bool = False
     COMPACT_OVERLAY_POSITION: str = "bottom_center"  # "bottom_center" or "bottom_right"
     START_HIDDEN_TO_TRAY: bool = field(default_factory=_start_hidden_default)
     # Whisper expects 16 kHz audio regardless of recorder sample rate
@@ -209,7 +211,7 @@ class AppConfig:
     PRELOAD_WHISPER_ON_START: bool = True
 
     # Streaming transcription settings
-    STREAMING_ENABLED: bool = True  # Real-time preview while recording
+    STREAMING_ENABLED: bool = True  # Real-time transcription while recording
     STREAMING_CHUNK_DURATION_SEC: float = 2.0  # Process every N seconds
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
