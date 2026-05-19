@@ -400,8 +400,10 @@ class TranscriptionRuntime:
             self.controller._pending_file_size = None
 
         settings = settings_manager.load_all_settings()
-        copy_clipboard = settings.get(SettingsKey.COPY_CLIPBOARD, False)
-        auto_paste = settings.get(SettingsKey.AUTO_PASTE, True)
+        copy_clipboard = settings.get(
+            SettingsKey.COPY_CLIPBOARD, config.DEFAULT_COPY_CLIPBOARD
+        )
+        auto_paste = settings.get(SettingsKey.AUTO_PASTE, config.DEFAULT_AUTO_PASTE)
         live_type_enabled = settings.get(
             SettingsKey.LIVE_TYPE_ENABLED, config.LIVE_TYPE_ENABLED
         )

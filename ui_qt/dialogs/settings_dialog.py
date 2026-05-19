@@ -126,12 +126,12 @@ class SettingsDialog(QDialog):
 
         # Auto-paste checkbox
         layout.addSpacing(12)
-        self.auto_paste_check = QCheckBox("Auto-paste transcription to active window")
+        self.auto_paste_check = QCheckBox("Insert transcription into active text field")
         self.auto_paste_check.setStyleSheet("color: #e0e0ff;")
         layout.addWidget(self.auto_paste_check)
 
         # Copy to clipboard checkbox
-        self.copy_clipboard_check = QCheckBox("Copy transcription to clipboard")
+        self.copy_clipboard_check = QCheckBox("Also copy transcription to clipboard")
         self.copy_clipboard_check.setStyleSheet("color: #e0e0ff;")
         layout.addWidget(self.copy_clipboard_check)
 
@@ -164,13 +164,13 @@ class SettingsDialog(QDialog):
 
         # Streaming overlay with auto-paste checkbox
         layout.addSpacing(8)
-        self.streaming_paste_check = QCheckBox("Show streaming overlay and auto-paste result")
+        self.streaming_paste_check = QCheckBox("Show streaming overlay near cursor")
         self.streaming_paste_check.setStyleSheet("color: #e0e0ff;")
         self.streaming_paste_check.stateChanged.connect(self._on_streaming_paste_changed)
         layout.addWidget(self.streaming_paste_check)
 
         # Info label for streaming overlay
-        streaming_paste_info = QLabel("Displays streaming text in a popup overlay near cursor.\nFinal transcription is pasted when recording stops.")
+        streaming_paste_info = QLabel("Displays streaming text in a popup overlay while recording.")
         streaming_paste_info.setStyleSheet("color: #808090; font-size: 10px;")
         streaming_paste_info.setWordWrap(True)
         layout.addWidget(streaming_paste_info)
@@ -596,8 +596,14 @@ class SettingsDialog(QDialog):
                     break
 
             # Load checkboxes
-            self.auto_paste_check.setChecked(settings.get(SettingsKey.AUTO_PASTE, True))
-            self.copy_clipboard_check.setChecked(settings.get(SettingsKey.COPY_CLIPBOARD, False))
+            self.auto_paste_check.setChecked(
+                settings.get(SettingsKey.AUTO_PASTE, config.DEFAULT_AUTO_PASTE)
+            )
+            self.copy_clipboard_check.setChecked(
+                settings.get(
+                    SettingsKey.COPY_CLIPBOARD, config.DEFAULT_COPY_CLIPBOARD
+                )
+            )
             self.minimize_tray_check.setChecked(settings.get(SettingsKey.MINIMIZE_TRAY, True))
 
             # Load streaming settings
@@ -686,8 +692,8 @@ class SettingsDialog(QDialog):
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
             # Use defaults on error
-            self.auto_paste_check.setChecked(True)
-            self.copy_clipboard_check.setChecked(False)
+            self.auto_paste_check.setChecked(config.DEFAULT_AUTO_PASTE)
+            self.copy_clipboard_check.setChecked(config.DEFAULT_COPY_CLIPBOARD)
             self.minimize_tray_check.setChecked(True)
             self.streaming_enabled_check.setChecked(config.STREAMING_ENABLED)
             self.streaming_paste_check.setChecked(False)
