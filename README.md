@@ -1,4 +1,83 @@
-# OpenWhisper
+# RomanVoice
+
+RomanVoice is a local-first Windows dictation fork of OpenWhisper. The first
+milestone is simple: press a global hotkey, speak, transcribe locally with
+Faster-Whisper, and type the result into the active Windows app without touching
+the clipboard unless a fallback is needed.
+
+## RomanVoice Quick Start
+
+Use Python 3.12 through `uv`; the machine default Python may be too new for
+CTranslate2/Faster-Whisper wheels.
+
+```powershell
+uv sync --python 3.12
+uv run --python 3.12 python scripts\phase1_smoke_test.py
+scripts\romanvoice.cmd
+```
+
+`scripts\romanvoice.cmd` is the everyday background launcher: it starts hidden
+to tray with global hotkeys enabled. Use `scripts\romanvoice-ui.cmd` only when
+you explicitly want the full window for settings, history, or debugging.
+
+To keep RomanVoice running after login and restart it if it exits, install the
+background watchdog:
+
+```powershell
+scripts\install-background-watchdog.ps1
+```
+
+This tries to create reversible scheduled tasks. If Task Scheduler registration
+is blocked by Windows policy, it falls back to a Startup-folder watchdog script
+that runs hidden and checks once per minute. Remove either setup with:
+
+```powershell
+scripts\remove-background-watchdog.ps1
+```
+
+The smoke test records the important hardware/runtime facts for the RTX 5070
+path: driver, compute capability, CTranslate2 version, model load time, and
+transcription time. The current target stack is `faster-whisper==1.2.1`,
+`ctranslate2==4.7.1`, CUDA `float16`, and the `turbo` model.
+
+Runtime data is stored under app-data paths:
+
+- `%APPDATA%\RomanVoice\config.json`
+- `%APPDATA%\RomanVoice\history.sqlite`
+- `%LOCALAPPDATA%\RomanVoice\recordings`
+- `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
+
+Text insertion defaults to Windows `SendInput` Unicode typing. Clipboard paste is
+only a fallback for long text, failed Unicode insertion, or when explicitly
+selected in settings. Global hotkeys may not fire into elevated/UAC windows
+unless the app is also run as administrator, and full-screen exclusive games may
+ignore synthesized Unicode input.
+
+Default hotkeys:
+
+- `Ctrl+Space`: start/stop recording
+- `Ctrl+Alt+Backspace`: cancel recording/transcription
+- `Ctrl+Alt+Shift+Space`: enable/disable hotkeys
+
+RomanVoice runs in cooperative CUDA mode by default. If another program is
+already saturating the GPU or memory is tight, RomanVoice defers Whisper warmup,
+skips live-preview inference, waits before final GPU transcription, and can fall
+back to a CPU model rather than competing with an export/game workload.
+
+Optional polish uses an external Ollama install and is disabled by default. If
+enabled, use a small text model such as `gemma3:1b`:
+
+```powershell
+ollama pull gemma3:1b
+```
+
+Polish is only attempted on longer utterances and has a hard timeout. If Ollama
+is unavailable, slow, unloaded, or returns unusable output, RomanVoice keeps and
+inserts the raw transcript.
+
+---
+
+# OpenWhisper Upstream Notes
 
 A desktop app for recording audio and transcribing it to text using local Whisper models or OpenAI API. Features a modern PyQt6 GUI, system tray integration, global hotkeys, and auto-paste.
 
@@ -172,4 +251,3 @@ python app_qt.py
 ## License
 
 MIT License. Free to use, clone, and modify.
-

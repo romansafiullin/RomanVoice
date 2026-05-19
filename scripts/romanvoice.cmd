@@ -1,5 +1,6 @@
 @echo off
-rem Backward-compatible RomanVoice background launcher.
+rem RomanVoice background launcher. Keeps the reliable first release on uv
+rem while avoiding a visible console/main window for everyday dictation.
 
 setlocal
 set "REPO=%~dp0.."
