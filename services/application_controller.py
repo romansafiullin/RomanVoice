@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from typing import Dict, Optional
@@ -66,6 +67,8 @@ class ApplicationController(QObject):
         self._last_streaming_text = ""
         self._live_typed_text = ""
         self._live_typing_failed = False
+        self._last_gpu_unload_time = 0.0
+        self._last_gpu_warmup_defer_log_time = 0.0
 
         self._pending_audio_path: Optional[str] = None
         self._pending_audio_duration: Optional[float] = None
@@ -119,10 +122,10 @@ class ApplicationController(QObject):
                 ):
                     while not self._shutdown_requested.is_set():
                         status = gpu_guard.query_status()
-                        busy_reason = status.busy_reason()
-                        if not busy_reason:
+                        defer_reason = self._gpu_warmup_defer_reason(status)
+                        if not defer_reason:
                             break
-                        logger.info("Deferring Whisper warmup; CUDA busy: %s", busy_reason)
+                        logger.info("Deferring Whisper warmup; %s", defer_reason)
                         self.status_update.emit(
                             "Ready (GPU busy; Whisper warmup deferred)"
                         )
@@ -174,6 +177,7 @@ class ApplicationController(QObject):
             and not local_backend.is_loading
         ):
             logger.info("Unloading Whisper while CUDA is busy: %s", busy_reason)
+            self._last_gpu_unload_time = time.monotonic()
             self.device_info_update.emit("Whisper unloaded while GPU busy")
             self.executor.submit(local_backend.cleanup)
             return
@@ -184,8 +188,41 @@ class ApplicationController(QObject):
             and not local_backend.is_available()
             and not local_backend.is_loading
         ):
+            defer_reason = self._gpu_warmup_defer_reason(status)
+            if defer_reason:
+                now = time.monotonic()
+                if now - self._last_gpu_warmup_defer_log_time >= 60.0:
+                    logger.info("Deferring Whisper warmup; %s", defer_reason)
+                    self._last_gpu_warmup_defer_log_time = now
+                return
+
             logger.info("CUDA budget recovered; warming Whisper again")
             self._preload_local_whisper_async()
+
+    def _gpu_warmup_defer_reason(self, status) -> Optional[str]:
+        busy_reason = status.busy_reason()
+        if busy_reason:
+            return f"CUDA busy: {busy_reason}"
+
+        if getattr(status, "available", False):
+            free_mb = status.memory_free_mb
+            if (
+                free_mb is not None
+                and free_mb < config.GPU_WARMUP_MIN_FREE_MEMORY_MB
+            ):
+                return (
+                    f"free memory {free_mb} MB below warmup threshold "
+                    f"{config.GPU_WARMUP_MIN_FREE_MEMORY_MB} MB"
+                )
+
+        if self._last_gpu_unload_time:
+            elapsed_ms = (time.monotonic() - self._last_gpu_unload_time) * 1000
+            remaining_ms = config.GPU_COOPERATIVE_RELOAD_COOLDOWN_MS - elapsed_ms
+            if remaining_ms > 0:
+                remaining_sec = int((remaining_ms + 999) // 1000)
+                return f"reload cooldown active for {remaining_sec}s"
+
+        return None
 
     def _setup_ui_callbacks(self) -> None:
         """Setup UI event callbacks."""

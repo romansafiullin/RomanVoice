@@ -172,7 +172,16 @@ class FakeLocalBackend:
         self.model_name = model_name or "base"
         self.device_info = "cpu"
         self.is_transcribing = False
+        self.is_loading = False
+        self.uses_cuda = True
+        self.available = True
         self.cleaned_up = False
+
+    def ensure_loaded(self):
+        self.available = True
+
+    def is_available(self):
+        return self.available
 
     def transcribe(self, audio_path):
         return f"local:{audio_path}"
@@ -647,6 +656,77 @@ class TestApplicationController(unittest.TestCase):
             self.text_injector.live_updates[-1],
             ("", "draft text", 0),
         )
+
+    def test_gpu_monitor_unloads_loaded_cuda_backend_when_busy(self):
+        controller = self._create_controller()
+        local_backend = controller.transcription_backends["local_whisper"]
+        status = types.SimpleNamespace(
+            available=True,
+            memory_free_mb=2000,
+            busy_reason=lambda: "free memory 2000 MB",
+        )
+
+        with patch.object(
+            self.app_controller_module.gpu_guard,
+            "query_status",
+            return_value=status,
+        ):
+            controller._on_gpu_cooperation_tick()
+
+        self.assertEqual(controller.executor.submissions[-1][0], local_backend.cleanup)
+        self.assertGreater(controller._last_gpu_unload_time, 0.0)
+
+    def test_gpu_monitor_defers_reload_until_memory_hysteresis_is_clear(self):
+        controller = self._create_controller()
+        local_backend = controller.transcription_backends["local_whisper"]
+        local_backend.available = False
+        controller._last_gpu_unload_time = (
+            time.monotonic()
+            - (config.GPU_COOPERATIVE_RELOAD_COOLDOWN_MS / 1000)
+            - 1
+        )
+        preload_calls = []
+        controller._preload_local_whisper_async = lambda: preload_calls.append(True)
+        status = types.SimpleNamespace(
+            available=True,
+            memory_free_mb=config.GPU_WARMUP_MIN_FREE_MEMORY_MB - 1,
+            busy_reason=lambda: None,
+        )
+
+        with patch.object(
+            self.app_controller_module.gpu_guard,
+            "query_status",
+            return_value=status,
+        ):
+            controller._on_gpu_cooperation_tick()
+
+        self.assertEqual(preload_calls, [])
+
+    def test_gpu_monitor_reloads_after_cooldown_and_warmup_memory_budget(self):
+        controller = self._create_controller()
+        local_backend = controller.transcription_backends["local_whisper"]
+        local_backend.available = False
+        controller._last_gpu_unload_time = (
+            time.monotonic()
+            - (config.GPU_COOPERATIVE_RELOAD_COOLDOWN_MS / 1000)
+            - 1
+        )
+        preload_calls = []
+        controller._preload_local_whisper_async = lambda: preload_calls.append(True)
+        status = types.SimpleNamespace(
+            available=True,
+            memory_free_mb=config.GPU_WARMUP_MIN_FREE_MEMORY_MB + 500,
+            busy_reason=lambda: None,
+        )
+
+        with patch.object(
+            self.app_controller_module.gpu_guard,
+            "query_status",
+            return_value=status,
+        ):
+            controller._on_gpu_cooperation_tick()
+
+        self.assertEqual(preload_calls, [True])
 
     def test_cleanup_is_safe_with_partial_state(self):
         controller = self._create_controller()
