@@ -13,7 +13,6 @@ venv/*
 .venv/
 .smoke/
 CLAUDE.md
-AGENTS.md
 specs/ANIMATION_STATE_TRANSITION_FIX.md
 wsl_venv/*
 transcription_history.json
