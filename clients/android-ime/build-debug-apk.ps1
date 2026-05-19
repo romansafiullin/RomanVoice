@@ -77,8 +77,7 @@ $JavaSources += Get-ChildItem -Recurse -Filter "*.java" (Join-Path $AppRoot "src
 $JavaSources += Get-ChildItem -Recurse -Filter "*.java" (Join-Path $BuildRoot "generated") | ForEach-Object { $_.FullName }
 
 Invoke-Checked "javac" (@(
-    "-source", "17",
-    "-target", "17",
+    "--release", "17",
     "-encoding", "UTF-8",
     "-classpath", $PlatformJar,
     "-d", (Join-Path $BuildRoot "classes")
