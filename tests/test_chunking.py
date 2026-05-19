@@ -8,6 +8,8 @@ import sys
 import logging
 from pathlib import Path
 
+import pytest
+
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,14 +21,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def test_chunking():
+def _run_chunking_check(test_file: str) -> bool:
     """Test the chunking functionality with our generated test file."""
-    test_file = "test_chunking_audio.wav"
-
-    if not os.path.exists(test_file):
-        logger.error(f"Test file not found: {test_file}")
-        return False
-
     logger.info("Testing chunking functionality...")
 
     try:
@@ -82,6 +78,14 @@ def test_chunking():
         return False
 
 
+def test_chunking():
+    test_file = "test_chunking_audio.wav"
+    if not os.path.exists(test_file):
+        pytest.skip(f"Test file not found: {test_file}")
+
+    assert _run_chunking_check(test_file)
+
+
 if __name__ == "__main__":
-    success = test_chunking()
+    success = _run_chunking_check("test_chunking_audio.wav")
     sys.exit(0 if success else 1)
