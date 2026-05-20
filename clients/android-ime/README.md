@@ -6,6 +6,10 @@ WebSocket, writes live partials into the active Android text field with
 `InputConnection.setComposingText()`, then commits the final transcript with
 `InputConnection.commitText()`.
 
+It also includes an opt-in floating mic accessibility service. That path keeps
+your normal keyboard, such as Gboard or SwiftKey, active while a small draggable
+RomanVoice button inserts dictated text into the focused editable field.
+
 ## Service URL
 
 RomanVoice config still defaults to `127.0.0.1:8799`, which a phone cannot
@@ -46,6 +50,10 @@ Build and install the `app` module on the Pixel 7. After install:
 2. Paste the streaming URL and token.
 3. Enable the keyboard in Android system keyboard settings.
 4. Select RomanVoice as the current keyboard in a text field.
+
+For the floating mic path, keep your normal keyboard selected and enable
+`RomanVoice Floating Mic` in Android Accessibility settings. The RomanVoice
+Settings screen has a shortcut button to open that system settings page.
 
 The IME checks `/v1/health` whenever the keyboard opens. If RomanVoice is not
 reachable, it shows `RomanVoice offline` before recording starts and offers a

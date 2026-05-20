@@ -40,9 +40,11 @@ class FakeSegment:
 class FakeStreamingModel:
     def __init__(self):
         self.seen_samples = 0
+        self.seen_kwargs = None
 
     def transcribe(self, audio_array, **kwargs):
         self.seen_samples = len(audio_array)
+        self.seen_kwargs = kwargs
         return [FakeSegment("streamed words")], SimpleNamespace(language="en")
 
 
@@ -243,6 +245,7 @@ def test_service_streams_pcm16_audio_with_bearer_token():
     assert final["sample_rate"] == 16000
     assert final["used_polish"] is False
     assert backend.model.seen_samples == 1600
+    assert backend.model.seen_kwargs["vad_filter"] is True
 
 
 def test_service_streaming_returns_empty_for_all_zero_audio():

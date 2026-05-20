@@ -2,5 +2,7 @@
 <resources>
     <string name="app_name">RomanVoice IME</string>
     <string name="ime_name">RomanVoice</string>
+    <string name="floating_service_name">RomanVoice Floating Mic</string>
+    <string name="floating_service_description">Shows a floating RomanVoice mic button that inserts dictated text into the focused field while your normal keyboard stays active.</string>
     <string name="settings_title">RomanVoice Settings</string>
 </resources>

@@ -20,3 +20,35 @@ def test_phone_installer_recovers_from_debug_signature_mismatch():
 
     assert "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in script
     assert "uninstall app.romanvoice.ime" in script
+
+
+def test_android_manifest_declares_floating_accessibility_service():
+    manifest = (ANDROID_IME_ROOT / "app" / "src" / "main" / "AndroidManifest.xml").read_text(
+        encoding="utf-8"
+    )
+    service_xml = (
+        ANDROID_IME_ROOT / "app" / "src" / "main" / "res" / "xml" / "accessibility_service.xml"
+    ).read_text(encoding="utf-8")
+
+    assert ".RomanVoiceFloatingService" in manifest
+    assert "android.permission.BIND_ACCESSIBILITY_SERVICE" in manifest
+    assert "@xml/accessibility_service" in manifest
+    assert "android:canRetrieveWindowContent=\"true\"" in service_xml
+
+
+def test_floating_service_uses_accessibility_overlay_and_set_text():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "TYPE_ACCESSIBILITY_OVERLAY" in source
+    assert "ACTION_SET_TEXT" in source
+    assert "RomanVoiceStreamClient" in source

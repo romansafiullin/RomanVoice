@@ -403,6 +403,7 @@ class RomanVoiceDictationService:
                             backend=backend,
                             chunk_duration_sec=float(config.STREAMING_CHUNK_DURATION_SEC),
                             transcription_lock=getattr(self.controller, "_transcription_lock", None),
+                            vad_filter=True,
                         )
                         streamer.start_streaming(sample_rate=sample_rate, callback=send_partial)
                         websocket.send_json(

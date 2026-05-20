@@ -50,6 +50,10 @@ product or architecture direction.
   `GET /v1/transcribe/stream` for authenticated WebSocket streaming. Streaming
   clients send PCM16 mono chunks and receive replacement partials plus a final
   transcript.
+- The Android client in `clients/android-ime` has two phone input surfaces: a
+  full RomanVoice IME and an opt-in `RomanVoice Floating Mic` accessibility
+  service that keeps SwiftKey/Gboard active while inserting text into the
+  focused editable field.
 - The known preferred microphone path is the WASAPI default resolving to
   `Microphone (3- Razer Kiyo)` when that device is present.
 - The currently working startup fallback is the Startup-folder VBS watchdog:

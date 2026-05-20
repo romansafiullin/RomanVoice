@@ -64,6 +64,11 @@ WebSocket endpoint for live clients such as the Android IME in
 `start` message; RomanVoice sends replacement `partial` messages and a `final`
 message after `stop`.
 
+The Android client can run either as a standalone RomanVoice keyboard or as an
+opt-in floating mic accessibility service. The floating path keeps the normal
+phone keyboard active and uses RomanVoice only for dictation into the focused
+editable field.
+
 Useful service environment overrides:
 
 ```powershell

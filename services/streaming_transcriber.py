@@ -27,6 +27,7 @@ class StreamingTranscriber:
         backend,
         chunk_duration_sec: float = 3.0,
         transcription_lock: Any | None = None,
+        vad_filter: bool = False,
     ):
         """Initialize the streaming transcriber.
 
@@ -37,6 +38,7 @@ class StreamingTranscriber:
         self.backend = backend
         self.chunk_duration_sec = chunk_duration_sec
         self.transcription_lock = transcription_lock
+        self.vad_filter = vad_filter
 
         # Audio queue for producer-consumer pattern
         self.audio_queue: queue.Queue = queue.Queue(maxsize=config.STREAMING_QUEUE_SIZE)
@@ -62,7 +64,10 @@ class StreamingTranscriber:
         self._last_warning_time = 0
         self._last_gpu_skip_log = 0.0
 
-        logger.info(f"StreamingTranscriber initialized (chunk_duration={chunk_duration_sec}s)")
+        logger.info(
+            "StreamingTranscriber initialized "
+            f"(chunk_duration={chunk_duration_sec}s, vad_filter={vad_filter})"
+        )
 
     def start_streaming(self, sample_rate: int, callback: Callable[[str, bool], None]):
         """Start the streaming worker thread.
@@ -239,7 +244,7 @@ class StreamingTranscriber:
                     beam_size=config.STREAMING_BEAM_SIZE,
                     condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
                     initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
-                    vad_filter=False  # Disable VAD for streaming (faster)
+                    vad_filter=self.vad_filter,
                 )
 
                 # Collect text from all segments

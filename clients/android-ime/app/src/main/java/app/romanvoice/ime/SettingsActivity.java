@@ -2,8 +2,10 @@ package app.romanvoice.ime;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -68,6 +70,11 @@ public class SettingsActivity extends Activity {
         permissionButton.setOnClickListener(view -> requestRecordPermission());
         root.addView(permissionButton, matchWidth());
 
+        Button accessibilityButton = new Button(this);
+        accessibilityButton.setText("Open floating mic accessibility setting");
+        accessibilityButton.setOnClickListener(view -> openAccessibilitySettings());
+        root.addView(accessibilityButton, matchWidth());
+
         Button saveButton = new Button(this);
         saveButton.setText("Save");
         saveButton.setOnClickListener(view -> {
@@ -107,6 +114,10 @@ public class SettingsActivity extends Activity {
         if (!hasRecordPermission()) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, RECORD_AUDIO_REQUEST);
         }
+    }
+
+    private void openAccessibilitySettings() {
+        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
     }
 
     private int dp(int value) {
