@@ -63,13 +63,8 @@ function Start-ResidentWatchdog {
         return
     }
 
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-WindowStyle', 'Hidden',
-        '-File', $watchScript,
-        '-IntervalSeconds', '60'
-    ) -WindowStyle Hidden
+    $watchArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $watchScript + '" -IntervalSeconds 60'
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $watchArgs -WindowStyle Hidden
     Start-Sleep -Seconds 1
     Write-Host '[ok] Resident watchdog started for this session.'
 }
