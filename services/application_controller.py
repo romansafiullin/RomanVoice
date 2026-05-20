@@ -68,6 +68,8 @@ class ApplicationController(QObject):
         self._streaming_enabled = False
         self._streaming_paste_enabled = False
         self._last_streaming_text = ""
+        self._best_streaming_text = ""
+        self._streaming_guard_evaluated = False
         self._live_typed_text = ""
         self._live_typing_failed = False
         self._last_gpu_unload_time = 0.0

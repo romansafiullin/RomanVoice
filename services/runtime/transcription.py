@@ -54,6 +54,8 @@ class TranscriptionRuntime:
         if self.controller.recorder.start_recording():
             logger.info("Recording started")
             self.controller._last_streaming_text = ""
+            self.controller._best_streaming_text = ""
+            self.controller._streaming_guard_evaluated = False
             self.controller._live_typed_text = ""
             self.controller._live_typing_failed = False
             self.controller.ui_controller.clear_transcription_stats()
@@ -262,12 +264,11 @@ class TranscriptionRuntime:
                 backend = self._select_backend_for_transcription()
                 self.controller._active_transcription_backend = backend
                 transcript = backend.transcribe(audio_path)
-                if not transcript.strip() and self.controller._last_streaming_text.strip():
-                    transcript = self.controller._last_streaming_text.strip()
-                    logger.info(
-                        "Using streaming transcript fallback after empty final pass (%s chars)",
-                        len(transcript),
-                    )
+                transcript = self._choose_transcript_with_streaming_guard(
+                    transcript,
+                    context="final pass",
+                )
+                self.controller._streaming_guard_evaluated = True
                 transcript = self._maybe_polish_transcript(transcript)
             if self._is_current_job(job_id):
                 self.controller.transcription_completed.emit(transcript)
@@ -317,12 +318,11 @@ class TranscriptionRuntime:
                         transcripts.append(backend.transcribe(chunk_file))
                     transcript = audio_processor.combine_transcriptions(transcripts)
 
-                if not transcript.strip() and self.controller._last_streaming_text.strip():
-                    transcript = self.controller._last_streaming_text.strip()
-                    logger.info(
-                        "Using streaming transcript fallback after empty large final pass (%s chars)",
-                        len(transcript),
-                    )
+                transcript = self._choose_transcript_with_streaming_guard(
+                    transcript,
+                    context="large final pass",
+                )
+                self.controller._streaming_guard_evaluated = True
 
                 transcript = self._maybe_polish_transcript(transcript)
             if self._is_current_job(job_id):
@@ -344,12 +344,12 @@ class TranscriptionRuntime:
 
     def on_transcription_complete(self, transcript: str) -> None:
         """Handle transcription completion."""
-        transcript = (transcript or "").strip()
-        if not transcript and self.controller._last_streaming_text.strip():
-            transcript = self.controller._last_streaming_text.strip()
-            logger.info(
-                "Using streaming transcript fallback during completion (%s chars)",
-                len(transcript),
+        if self.controller._streaming_guard_evaluated:
+            transcript = (transcript or "").strip()
+        else:
+            transcript = self._choose_transcript_with_streaming_guard(
+                transcript,
+                context="completion",
             )
 
         if not transcript.strip():
@@ -364,6 +364,8 @@ class TranscriptionRuntime:
             if self.controller._streaming_paste_enabled:
                 self.controller.caret_indicator_hide.emit()
             self.controller._last_streaming_text = ""
+            self.controller._best_streaming_text = ""
+            self.controller._streaming_guard_evaluated = False
             self.controller._live_typed_text = ""
             self.controller._live_typing_failed = False
             return
@@ -507,8 +509,55 @@ class TranscriptionRuntime:
             self.controller.caret_indicator_hide.emit()
 
         self.controller._last_streaming_text = ""
+        self.controller._best_streaming_text = ""
+        self.controller._streaming_guard_evaluated = False
         self.controller._live_typed_text = ""
         self.controller._live_typing_failed = False
+
+    def _choose_transcript_with_streaming_guard(
+        self,
+        transcript: str,
+        *,
+        context: str,
+    ) -> str:
+        final_text = (transcript or "").strip()
+        streaming_text = self.controller._last_streaming_text.strip()
+        best_streaming_text = getattr(self.controller, "_best_streaming_text", "").strip()
+        if len(best_streaming_text) > len(streaming_text):
+            streaming_text = best_streaming_text
+        if not streaming_text:
+            return final_text
+
+        if not final_text:
+            logger.info(
+                "Using streaming transcript fallback after empty %s (%s chars)",
+                context,
+                len(streaming_text),
+            )
+            return streaming_text
+
+        duration = self.controller._pending_audio_duration or 0.0
+        char_delta = len(streaming_text) - len(final_text)
+        final_ratio = len(final_text) / max(len(streaming_text), 1)
+        if (
+            duration >= config.LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS
+            and len(streaming_text) >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHARS
+            and char_delta >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHAR_DELTA
+            and final_ratio <= config.LONG_FORM_STREAMING_FALLBACK_RATIO
+        ):
+            logger.warning(
+                "Using streaming transcript for long-form %s because final pass "
+                "was much shorter (duration=%.1fs, streaming_chars=%s, "
+                "final_chars=%s, ratio=%.2f)",
+                context,
+                duration,
+                len(streaming_text),
+                len(final_text),
+                final_ratio,
+            )
+            return streaming_text
+
+        return final_text
 
     def on_transcription_error(self, error_message: str) -> None:
         """Handle transcription error."""
@@ -518,6 +567,8 @@ class TranscriptionRuntime:
         if self.controller._streaming_paste_enabled:
             self.controller.caret_indicator_hide.emit()
         self.controller._live_typed_text = ""
+        self.controller._best_streaming_text = ""
+        self.controller._streaming_guard_evaluated = False
         self.controller._live_typing_failed = False
 
     def on_model_changed(self, model_name: str) -> None:

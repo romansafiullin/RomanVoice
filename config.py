@@ -272,12 +272,20 @@ class AppConfig:
     SERVICE_TOKEN_FILE: str = field(default_factory=_service_token_file)
     SERVICE_TOKEN: str = field(default_factory=_service_token_default)
     SERVICE_MAX_AUDIO_MB: int = _env_int("ROMANVOICE_SERVICE_MAX_AUDIO_MB", 25)
+    SERVICE_SAVE_LAST_STREAM_WAV: bool = _env_bool(
+        "ROMANVOICE_SERVICE_SAVE_LAST_STREAM_WAV",
+        True,
+    )
 
     # Streaming transcription settings
     STREAMING_ENABLED: bool = True  # Real-time transcription while recording
     STREAMING_CHUNK_DURATION_SEC: float = 2.0  # Process every N seconds
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
+    LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS: float = 45.0
+    LONG_FORM_STREAMING_FALLBACK_MIN_CHARS: int = 300
+    LONG_FORM_STREAMING_FALLBACK_MIN_CHAR_DELTA: int = 200
+    LONG_FORM_STREAMING_FALLBACK_RATIO: float = 0.80
 
     # Waveform style settings
     CURRENT_WAVEFORM_STYLE: str = "particle"

@@ -71,10 +71,13 @@ class StreamingRuntime:
 
     def on_partial_transcription(self, text: str, is_final: bool) -> None:
         """Handle partial transcription from the streaming worker."""
-        self.controller._last_streaming_text = text or ""
-        if text:
+        next_text = text or ""
+        self.controller._last_streaming_text = next_text
+        if len(next_text) > len(getattr(self.controller, "_best_streaming_text", "")):
+            self.controller._best_streaming_text = next_text
+        if next_text:
             self.controller.note_voice_activity()
-        self._type_live_update(text or "")
+        self._type_live_update(next_text)
         self.controller.partial_transcription.emit(text, is_final)
         if self.controller._streaming_paste_enabled and text:
             self.controller.streaming_text_update.emit(text, is_final)
@@ -104,6 +107,8 @@ class StreamingRuntime:
         streaming_text = self.controller.streaming_transcriber.stop_streaming()
         if streaming_text:
             self.controller._last_streaming_text = streaming_text
+            if len(streaming_text) > len(getattr(self.controller, "_best_streaming_text", "")):
+                self.controller._best_streaming_text = streaming_text
         self.controller.recorder.set_streaming_callback(None)
         logger.info(
             f"Streaming transcription stopped, got {len(streaming_text)} chars"

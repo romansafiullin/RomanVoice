@@ -50,6 +50,7 @@ class StreamingTranscriber:
 
         # Transcription accumulation
         self.all_transcriptions: List[str] = []
+        self._best_transcription = ""
 
         # Master audio buffer - holds ALL audio from session for rolling re-transcription
         self._all_audio_buffer: List[np.ndarray] = []
@@ -85,6 +86,7 @@ class StreamingTranscriber:
         self.is_streaming = True
         self._stop_requested = False
         self.all_transcriptions.clear()
+        self._best_transcription = ""
         self._all_audio_buffer.clear()  # Clear master audio buffer
         self._chunk_count = 0
         self._slow_chunks = 0
@@ -134,9 +136,18 @@ class StreamingTranscriber:
 
         # Get the final transcription (now stored as complete text)
         final_text = " ".join(self.all_transcriptions).strip()
+        if len(self._best_transcription) > len(final_text):
+            logger.info(
+                "Using best streaming transcript after stop "
+                "(best_chars=%s, last_chars=%s)",
+                len(self._best_transcription),
+                len(final_text),
+            )
+            final_text = self._best_transcription
 
         # Clear buffers
         self._all_audio_buffer.clear()
+        self._best_transcription = ""
 
         logger.info(f"Streaming stopped. Re-transcription cycles: {self._chunk_count}, "
                     f"Final length: {len(final_text)} chars")
@@ -274,6 +285,8 @@ class StreamingTranscriber:
 
             # Store the complete transcription (replaces previous)
             self.all_transcriptions = [full_text] if full_text else []
+            if len(full_text) > len(self._best_transcription):
+                self._best_transcription = full_text
 
             # Emit callback with COMPLETE transcription (is_final=True means replace)
             if self.callback and full_text:

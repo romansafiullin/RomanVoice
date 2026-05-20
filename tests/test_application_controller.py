@@ -625,6 +625,36 @@ class TestApplicationController(unittest.TestCase):
             ("", "streaming fallback", 0),
         )
 
+    def test_transcription_complete_prefers_long_streaming_text_when_final_is_truncated(self):
+        controller = self._create_controller()
+        streaming_text = "streaming phrase " * 40
+        final_text = "final phrase " * 12
+        controller._pending_audio_duration = 101.4
+        controller._last_streaming_text = "late phrase " * 8
+        controller._best_streaming_text = streaming_text
+        controller._live_typed_text = streaming_text
+
+        controller._on_transcription_complete(final_text)
+
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], streaming_text.strip())
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            (streaming_text, streaming_text.strip(), 0),
+        )
+
+    def test_transcription_complete_keeps_final_text_for_short_recordings(self):
+        controller = self._create_controller()
+        streaming_text = "streaming phrase " * 40
+        final_text = "final phrase " * 12
+        controller._pending_audio_duration = 12.5
+        controller._last_streaming_text = streaming_text
+
+        controller._on_transcription_complete(final_text)
+
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], final_text.strip())
+
     def test_transcription_complete_does_not_copy_clipboard_by_default(self):
         self.settings.all_settings.pop("copy_clipboard")
         controller = self._create_controller()
@@ -681,6 +711,21 @@ class TestApplicationController(unittest.TestCase):
         self.assertEqual(
             self.text_injector.live_updates[-1],
             ("", "draft text", 0),
+        )
+
+    def test_streaming_runtime_preserves_best_text_when_late_update_is_shorter(self):
+        controller = self._create_controller()
+
+        controller.streaming_runtime.on_partial_transcription(
+            "long streaming text that has the first half",
+            True,
+        )
+        controller.streaming_runtime.on_partial_transcription("short ending", True)
+
+        self.assertEqual(controller._last_streaming_text, "short ending")
+        self.assertEqual(
+            controller._best_streaming_text,
+            "long streaming text that has the first half",
         )
 
     def test_audio_level_marks_voice_activity_for_silence_auto_stop(self):

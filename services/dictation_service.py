@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
 import tempfile
 import threading
 import time
 import urllib.parse
+import wave
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -252,6 +254,89 @@ class RomanVoiceDictationService:
             handle.write(audio_bytes)
             return Path(handle.name)
 
+    def _write_temp_pcm16_wav(self, pcm_bytes: bytes, sample_rate: int) -> Path:
+        with tempfile.NamedTemporaryFile(
+            prefix="romanvoice_stream_",
+            suffix=".wav",
+            delete=False,
+        ) as handle:
+            path = Path(handle.name)
+        self._write_pcm16_wav(path, pcm_bytes, sample_rate)
+        return path
+
+    def _write_pcm16_wav(self, path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        aligned_length = len(pcm_bytes) - (len(pcm_bytes) % 2)
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(int(sample_rate))
+            wav_file.writeframes(pcm_bytes[:aligned_length])
+
+    def _save_last_stream_wav(self, pcm_bytes: bytes, sample_rate: int) -> str | None:
+        if not config.SERVICE_SAVE_LAST_STREAM_WAV or not pcm_bytes:
+            return None
+
+        try:
+            path = Path(config.RECORDINGS_FOLDER) / "romanvoice_phone_stream_last.wav"
+            self._write_pcm16_wav(path, pcm_bytes, sample_rate)
+            return str(path)
+        except OSError:
+            logger.debug("Failed to save last phone stream WAV", exc_info=True)
+            return None
+
+    @staticmethod
+    def _pcm16_metrics(pcm_bytes: bytes, sample_rate: int) -> dict[str, Any]:
+        aligned_length = len(pcm_bytes) - (len(pcm_bytes) % 2)
+        if aligned_length <= 0:
+            return {
+                "audio_duration_seconds": 0.0,
+                "audio_peak": 0,
+                "audio_rms": 0.0,
+                "sample_count": 0,
+            }
+
+        samples = np.frombuffer(pcm_bytes[:aligned_length], dtype=np.int16)
+        if samples.size == 0:
+            return {
+                "audio_duration_seconds": 0.0,
+                "audio_peak": 0,
+                "audio_rms": 0.0,
+                "sample_count": 0,
+            }
+
+        samples_32 = samples.astype(np.int32)
+        peak = int(np.max(np.abs(samples_32)))
+        rms = math.sqrt(float(np.mean(samples_32.astype(np.float64) ** 2)))
+        duration = samples.size / sample_rate if sample_rate > 0 else 0.0
+        return {
+            "audio_duration_seconds": round(duration, 3),
+            "audio_peak": peak,
+            "audio_rms": round(rms, 1),
+            "sample_count": int(samples.size),
+        }
+
+    @staticmethod
+    def _should_prefer_streaming_preview(
+        final_text: str,
+        rolling_text: str,
+        *,
+        duration_seconds: float,
+    ) -> bool:
+        final_text = (final_text or "").strip()
+        rolling_text = (rolling_text or "").strip()
+        if not final_text or not rolling_text:
+            return False
+
+        char_delta = len(rolling_text) - len(final_text)
+        final_ratio = len(final_text) / max(len(rolling_text), 1)
+        return (
+            duration_seconds >= config.LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS
+            and len(rolling_text) >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHARS
+            and char_delta >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHAR_DELTA
+            and final_ratio <= config.LONG_FORM_STREAMING_FALLBACK_RATIO
+        )
+
     def _transcribe_file(
         self,
         audio_path: Path,
@@ -296,6 +381,7 @@ class RomanVoiceDictationService:
     ) -> None:
         streamer: StreamingTranscriber | None = None
         total_audio_bytes = 0
+        stream_audio = bytearray()
         started = time.monotonic()
         final_sent = False
         state: dict[str, Any] = {
@@ -331,10 +417,95 @@ class RomanVoiceDictationService:
             nonlocal streamer, final_sent
             if streamer is None or final_sent:
                 return
-            raw_text = streamer.stop_streaming().strip()
+            rolling_text = streamer.stop_streaming().strip()
             streamer = None
-            polished = self._maybe_polish(raw_text, state["polish_mode"])
+            raw_text = rolling_text
+            final_source = "streaming_preview"
             backend = state.get("backend")
+            audio_bytes = bytes(stream_audio)
+            sample_rate = int(state["sample_rate"])
+            metrics = self._pcm16_metrics(audio_bytes, sample_rate)
+            debug_audio_path = self._save_last_stream_wav(audio_bytes, sample_rate)
+
+            if metrics["audio_peak"] > 0:
+                temp_wav_path: Path | None = None
+                try:
+                    temp_wav_path = self._write_temp_pcm16_wav(audio_bytes, sample_rate)
+                    lock = getattr(self.controller, "_transcription_lock", None)
+                    if lock is None:
+                        lock = threading.RLock()
+
+                    with lock:
+                        backend = self.controller.transcription_runtime._select_backend_for_transcription()
+                        self.controller._active_transcription_backend = backend
+                        final_raw_text = backend.transcribe(str(temp_wav_path)).strip()
+
+                    if self._should_prefer_streaming_preview(
+                        final_raw_text,
+                        rolling_text,
+                        duration_seconds=metrics["audio_duration_seconds"],
+                    ):
+                        raw_text = rolling_text
+                        final_source = "streaming_preview_long_form_guard"
+                        logger.warning(
+                            "Using rolling phone stream transcript because final pass "
+                            "was much shorter (duration=%.1fs, rolling_chars=%s, "
+                            "final_chars=%s)",
+                            metrics["audio_duration_seconds"],
+                            len(rolling_text),
+                            len(final_raw_text),
+                        )
+                    elif final_raw_text:
+                        raw_text = final_raw_text
+                        final_source = "final_wav"
+                    elif rolling_text:
+                        raw_text = rolling_text
+                        final_source = "streaming_preview_fallback"
+                        logger.info(
+                            "Using rolling stream transcript after empty final phone pass (%s chars)",
+                            len(raw_text),
+                        )
+                    else:
+                        raw_text = ""
+                        final_source = "final_wav_empty"
+                except Exception as exc:
+                    logger.warning(
+                        "Final phone stream transcription failed; using rolling preview: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    raw_text = rolling_text
+                    final_source = "streaming_preview_error_fallback"
+                finally:
+                    if temp_wav_path is not None:
+                        try:
+                            temp_wav_path.unlink(missing_ok=True)
+                        except OSError:
+                            logger.debug(
+                                "Failed to remove service temp stream WAV: %s",
+                                temp_wav_path,
+                            )
+            else:
+                logger.info(
+                    "Phone stream contained no non-zero PCM samples "
+                    "(bytes=%s, duration=%.3fs)",
+                    total_audio_bytes,
+                    metrics["audio_duration_seconds"],
+                )
+
+            polished = self._maybe_polish(raw_text, state["polish_mode"])
+            logger.info(
+                "Phone stream final source=%s bytes=%s duration=%.3fs peak=%s rms=%.1f "
+                "rolling_chars=%s final_chars=%s debug_audio=%s",
+                final_source,
+                total_audio_bytes,
+                metrics["audio_duration_seconds"],
+                metrics["audio_peak"],
+                metrics["audio_rms"],
+                len(rolling_text),
+                len(raw_text),
+                debug_audio_path or "",
+            )
             websocket.send_json(
                 {
                     "type": "final",
@@ -348,6 +519,12 @@ class RomanVoiceDictationService:
                     "content_type": "audio/raw;encoding=pcm_s16le",
                     "sample_rate": state["sample_rate"],
                     "channel_count": 1,
+                    "final_source": final_source,
+                    "audio_duration_seconds": metrics["audio_duration_seconds"],
+                    "audio_peak": metrics["audio_peak"],
+                    "audio_rms": metrics["audio_rms"],
+                    "rolling_text_length": len(rolling_text),
+                    "debug_audio_path": debug_audio_path,
                     "used_polish": polished["used_polish"],
                     "polish_mode": state["polish_mode"],
                     "duration_seconds": round(time.monotonic() - started, 3),
@@ -393,7 +570,10 @@ class RomanVoiceDictationService:
                         state["sample_rate"] = sample_rate
                         state["polish_mode"] = str(payload.get("polish") or "settings").lower()
 
-                        backend = self.controller.transcription_runtime._select_backend_for_transcription()
+                        backend = self.controller.current_backend
+                        if backend is None:
+                            websocket.send_error("no transcription backend is configured")
+                            continue
                         if not getattr(backend, "model", None) and not hasattr(backend, "ensure_loaded"):
                             websocket.send_error("streaming requires a local faster-whisper backend")
                             continue
@@ -429,16 +609,17 @@ class RomanVoiceDictationService:
                         websocket.send_error("send a start message before audio chunks")
                         continue
                     audio_bytes = bytes(message.data or b"")
-                    total_audio_bytes += len(audio_bytes)
-                    if total_audio_bytes > self.max_audio_bytes:
+                    if len(audio_bytes) % 2:
+                        audio_bytes = audio_bytes[:-1]
+                    if total_audio_bytes + len(audio_bytes) > self.max_audio_bytes:
                         websocket.send_error(
                             f"audio stream is too large; limit is {config.SERVICE_MAX_AUDIO_MB} MB"
                         )
                         websocket.close(1009, "audio stream too large")
                         break
-                    if len(audio_bytes) % 2:
-                        audio_bytes = audio_bytes[:-1]
                     if audio_bytes:
+                        total_audio_bytes += len(audio_bytes)
+                        stream_audio.extend(audio_bytes)
                         streamer.feed_audio(np.frombuffer(audio_bytes, dtype=np.int16))
                     continue
 

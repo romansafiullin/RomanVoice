@@ -5,12 +5,14 @@ import json
 import socket
 import struct
 import threading
+import wave
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
+from config import config
 from services.dictation_service import RomanVoiceDictationService
 from services.websocket_protocol import make_client_frame
 
@@ -38,25 +40,47 @@ class FakeSegment:
 
 
 class FakeStreamingModel:
-    def __init__(self):
+    def __init__(self, text: str = "streamed words"):
+        self.text = text
         self.seen_samples = 0
         self.seen_kwargs = None
 
     def transcribe(self, audio_array, **kwargs):
         self.seen_samples = len(audio_array)
         self.seen_kwargs = kwargs
-        return [FakeSegment("streamed words")], SimpleNamespace(language="en")
+        return [FakeSegment(self.text)], SimpleNamespace(language="en")
 
 
 class FakeStreamingBackend:
     name = "fake-streaming-whisper"
     device_info = "stream-device"
 
-    def __init__(self):
-        self.model = FakeStreamingModel()
+    def __init__(
+        self,
+        final_text: str = "final phone words",
+        rolling_text: str = "streamed words",
+    ):
+        self.model = FakeStreamingModel(rolling_text)
+        self.final_text = final_text
+        self.final_seen_path = None
+        self.final_wave_info = None
 
     def ensure_loaded(self):
         return None
+
+    def transcribe(self, audio_path: str) -> str:
+        path = Path(audio_path)
+        self.final_seen_path = path
+        assert path.exists()
+        assert path.suffix == ".wav"
+        with wave.open(str(path), "rb") as wav_file:
+            self.final_wave_info = {
+                "channels": wav_file.getnchannels(),
+                "sample_width": wav_file.getsampwidth(),
+                "frame_rate": wav_file.getframerate(),
+                "frames": wav_file.getnframes(),
+            }
+        return self.final_text
 
     def _clean_transcript_text(self, text: str) -> str:
         return text.strip()
@@ -65,8 +89,10 @@ class FakeStreamingBackend:
 class FakeRuntime:
     def __init__(self, backend):
         self.backend = backend
+        self.select_count = 0
 
     def _select_backend_for_transcription(self):
+        self.select_count += 1
         return self.backend
 
 
@@ -206,7 +232,8 @@ def test_service_rejects_unauthenticated_streaming_websocket():
     assert b" 401 " in response
 
 
-def test_service_streams_pcm16_audio_with_bearer_token():
+def test_service_streams_pcm16_audio_with_bearer_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
     backend = FakeStreamingBackend()
     controller = FakeController(backend)
     service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
@@ -221,6 +248,7 @@ def test_service_streams_pcm16_audio_with_bearer_token():
 
         send_text(sock, {"type": "start", "sample_rate": 16000, "polish": "off"})
         assert recv_server_json(sock)["type"] == "started"
+        assert controller.transcription_runtime.select_count == 0
 
         send_binary(sock, (b"\x01\x00" * 1600))
         send_text(sock, {"type": "stop"})
@@ -237,18 +265,32 @@ def test_service_streams_pcm16_audio_with_bearer_token():
 
     final = next(message for message in messages if message["type"] == "final")
     assert final["ok"] is True
-    assert final["text"] == "streamed words"
-    assert final["raw_text"] == "streamed words"
+    assert final["text"] == "final phone words"
+    assert final["raw_text"] == "final phone words"
     assert final["backend"] == "fake-streaming-whisper"
     assert final["device_info"] == "stream-device"
     assert final["bytes_received"] == 3200
     assert final["sample_rate"] == 16000
+    assert final["final_source"] == "final_wav"
+    assert final["audio_duration_seconds"] == 0.1
+    assert final["audio_peak"] == 1
+    assert final["audio_rms"] == 1.0
+    assert final["rolling_text_length"] == len("streamed words")
+    assert Path(final["debug_audio_path"]).name == "romanvoice_phone_stream_last.wav"
     assert final["used_polish"] is False
     assert backend.model.seen_samples == 1600
     assert backend.model.seen_kwargs["vad_filter"] is True
+    assert controller.transcription_runtime.select_count == 1
+    assert backend.final_wave_info == {
+        "channels": 1,
+        "sample_width": 2,
+        "frame_rate": 16000,
+        "frames": 1600,
+    }
 
 
-def test_service_streaming_returns_empty_for_all_zero_audio():
+def test_service_streaming_returns_empty_for_all_zero_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
     backend = FakeStreamingBackend()
     controller = FakeController(backend)
     service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
@@ -280,4 +322,85 @@ def test_service_streaming_returns_empty_for_all_zero_audio():
     assert final["text"] == ""
     assert final["raw_text"] == ""
     assert final["bytes_received"] == 3200
+    assert final["final_source"] == "streaming_preview"
+    assert final["audio_peak"] == 0
     assert backend.model.seen_samples == 0
+    assert backend.final_seen_path is None
+
+
+def test_service_streaming_falls_back_to_preview_when_final_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    backend = FakeStreamingBackend(final_text="")
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        send_text(sock, {"type": "start", "sample_rate": 16000, "polish": "off"})
+        assert recv_server_json(sock)["type"] == "started"
+
+        send_binary(sock, (b"\x01\x00" * 1600))
+        send_text(sock, {"type": "stop"})
+
+        while True:
+            payload = recv_server_json(sock)
+            if payload["type"] == "final":
+                final = payload
+                break
+        sock.close()
+    finally:
+        service.stop()
+
+    assert final["ok"] is True
+    assert final["text"] == "streamed words"
+    assert final["raw_text"] == "streamed words"
+    assert final["final_source"] == "streaming_preview_fallback"
+    assert backend.final_wave_info["frames"] == 1600
+
+
+def test_service_streaming_prefers_long_preview_when_final_is_truncated(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    rolling_text = "rolling phone words " * 45
+    final_text = "late phone words " * 12
+    backend = FakeStreamingBackend(final_text=final_text, rolling_text=rolling_text)
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        send_text(sock, {"type": "start", "sample_rate": 16000, "polish": "off"})
+        assert recv_server_json(sock)["type"] == "started"
+
+        send_binary(sock, (b"\x01\x00" * 800000))
+        send_text(sock, {"type": "stop"})
+
+        while True:
+            payload = recv_server_json(sock)
+            if payload["type"] == "final":
+                final = payload
+                break
+        sock.close()
+    finally:
+        service.stop()
+
+    assert final["ok"] is True
+    assert final["text"] == rolling_text.strip()
+    assert final["raw_text"] == rolling_text.strip()
+    assert final["final_source"] == "streaming_preview_long_form_guard"
+    assert final["audio_duration_seconds"] == 50.0
+    assert backend.final_wave_info["frames"] == 800000
