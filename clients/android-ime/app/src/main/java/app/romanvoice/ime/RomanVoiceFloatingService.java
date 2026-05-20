@@ -330,8 +330,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void captureInsertionState(AccessibilityNodeInfo node) {
-        CharSequence text = node.getText();
-        baseText = text == null ? "" : text.toString();
+        baseText = getEditableText(node);
 
         int start = node.getTextSelectionStart();
         int end = node.getTextSelectionEnd();
@@ -347,6 +346,41 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             insertionEnd = previousStart;
         }
         lastDictationText = "";
+    }
+
+    private String getEditableText(AccessibilityNodeInfo node) {
+        CharSequence text = node.getText();
+        String value = text == null ? "" : text.toString();
+        if (value.isEmpty()) {
+            return "";
+        }
+
+        CharSequence hint = node.getHintText();
+        if (hint != null && value.contentEquals(hint)) {
+            return "";
+        }
+
+        if (isKnownPlaceholder(node, value)) {
+            return "";
+        }
+
+        return value;
+    }
+
+    private boolean isKnownPlaceholder(AccessibilityNodeInfo node, String value) {
+        String normalized = value.trim();
+        if ("RCS message".equalsIgnoreCase(normalized)) {
+            return true;
+        }
+
+        CharSequence packageName = node.getPackageName();
+        if (packageName == null
+                || !"com.google.android.apps.messaging".contentEquals(packageName)) {
+            return false;
+        }
+
+        return "Text message".equalsIgnoreCase(normalized)
+                || "Message".equalsIgnoreCase(normalized);
     }
 
     private AccessibilityNodeInfo findFocusedEditableNode() {

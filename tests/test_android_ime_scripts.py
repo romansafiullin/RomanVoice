@@ -70,3 +70,22 @@ def test_floating_service_uses_accessibility_overlay_and_set_text():
     assert "TYPE_ACCESSIBILITY_OVERLAY" in source
     assert "ACTION_SET_TEXT" in source
     assert "RomanVoiceStreamClient" in source
+
+
+def test_floating_service_ignores_message_placeholder_text():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "node.getHintText()" in source
+    assert "isKnownPlaceholder" in source
+    assert "RCS message" in source
+    assert "com.google.android.apps.messaging" in source
