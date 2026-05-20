@@ -54,6 +54,54 @@ def test_android_manifest_declares_floating_accessibility_service():
     assert "android:canRetrieveWindowContent=\"true\"" in service_xml
 
 
+def test_android_manifest_declares_quick_settings_tile_service():
+    manifest = (ANDROID_IME_ROOT / "app" / "src" / "main" / "AndroidManifest.xml").read_text(
+        encoding="utf-8"
+    )
+    styles = (ANDROID_IME_ROOT / "app" / "src" / "main" / "res" / "values" / "styles.xml").read_text(
+        encoding="utf-8"
+    )
+    tile_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceTileService.java"
+    ).read_text(encoding="utf-8")
+    tile_action_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceTileActionActivity.java"
+    ).read_text(encoding="utf-8")
+
+    assert ".RomanVoiceTileService" in manifest
+    assert ".RomanVoiceTileActionActivity" in manifest
+    assert "@style/TileActionTheme" in manifest
+    assert "windowNoDisplay" in styles
+    assert "android.permission.BIND_QUICK_SETTINGS_TILE" in manifest
+    assert "android.service.quicksettings.action.QS_TILE" in manifest
+    assert "@drawable/ic_romanvoice_tile" in manifest
+    assert "extends TileService" in tile_source
+    assert "RomanVoiceFloatingService.isAvailableForTile()" in tile_source
+    assert "startActivityAndCollapseCompat(intent)" in tile_source
+    assert "RomanVoiceFloatingService::requestToggleFromTile" in tile_action_source
+    assert "TOGGLE_AFTER_FINISH_MS" in tile_action_source
+    assert 'tile.setSubtitle("Listening")' in tile_source
+    assert 'tile.setSubtitle("Connecting")' in tile_source
+    assert 'tile.setSubtitle("Unlock first")' in tile_source
+    assert "GLOBAL_ACTION_BACK" not in tile_source
+
+
 def test_floating_service_uses_accessibility_overlay_and_set_text():
     source = (
         ANDROID_IME_ROOT
@@ -70,6 +118,91 @@ def test_floating_service_uses_accessibility_overlay_and_set_text():
     assert "TYPE_ACCESSIBILITY_OVERLAY" in source
     assert "ACTION_SET_TEXT" in source
     assert "RomanVoiceStreamClient" in source
+
+
+def test_floating_service_has_tile_hook_and_cancel_path():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "static boolean requestToggleFromTile()" in source
+    assert "GLOBAL_ACTION_BACK" not in source
+    assert "private void cancelRecording()" in source
+    assert "removeLiveDictationText()" in source
+    assert 'cancelButton.setText("X")' in source
+    assert "private static final boolean SHOW_CANCEL_BUTTON = false" in source
+    assert "cancelButton.setOnClickListener(view -> cancelRecording())" in source
+    assert "overlayView.setVisibility(View.GONE)" in source
+    assert "statusView.setVisibility(View.GONE)" in source
+    assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording)" in source
+    assert "setPillState(PILL_COLOR_RECORDED, true)" in source
+    assert "showIdleNotice(\"Tap a text field first\")" in source
+    assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
+
+
+def test_floating_service_replaces_live_dictation_span_not_start_snapshot():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "baseText" not in source
+    assert "resolveReplacementRange(target, currentText)" in source
+    assert "findLiveDictationRange(currentText)" in source
+    assert "RomanVoiceTextRange.findLiveDictationRange" in source
+    assert "currentText.substring(0, start)" in source
+
+
+def test_ime_service_has_cancel_path_for_composing_text():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+
+    assert 'cancelButton.setText("Cancel")' in source
+    assert "private void cancelRecording()" in source
+    assert "clearComposingText()" in source
+    assert 'setStatus(wasRecording || hadClient ? "Canceled" : "Ready")' in source
+
+
+def test_settings_activity_can_prompt_for_quick_settings_tile():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "SettingsActivity.java"
+    ).read_text(encoding="utf-8")
+
+    assert "requestAddTileService" in source
+    assert "StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED" in source
+    assert 'tileButton.setText("Add RomanVoice Quick Settings tile")' in source
 
 
 def test_floating_service_ignores_message_placeholder_text():

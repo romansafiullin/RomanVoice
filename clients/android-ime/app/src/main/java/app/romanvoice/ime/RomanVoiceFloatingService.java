@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -23,13 +24,21 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.IOException;
 
-@SuppressWarnings("deprecation")
 public class RomanVoiceFloatingService extends AccessibilityService {
     private static final String TAG = "RomanVoiceFloat";
     private static final int SAMPLE_RATE = 16000;
+    private static final int PILL_COLOR_IDLE = 0xEE25312C;
+    private static final int PILL_COLOR_CONNECTING = 0xEE5E6252;
+    private static final int PILL_COLOR_RECORDING = 0xEEC8372D;
+    private static final int PILL_COLOR_RECORDED = 0xEE2F7D4C;
+    private static final int PILL_COLOR_ERROR = 0xEE7A3129;
+    private static final boolean SHOW_CANCEL_BUTTON = false;
+
+    private static volatile RomanVoiceFloatingService activeService;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -37,29 +46,68 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private WindowManager.LayoutParams overlayParams;
     private LinearLayout overlayView;
     private Button micButton;
+    private Button cancelButton;
     private TextView statusView;
+    private Runnable hideIdleOverlayRunnable;
 
     private volatile boolean recording;
+    private volatile boolean connecting;
     private AudioRecord audioRecord;
     private Thread audioThread;
     private RomanVoiceStreamClient client;
 
-    private String baseText = "";
     private int insertionStart = 0;
     private int insertionEnd = 0;
     private String lastDictationText = "";
 
+    static boolean isAvailableForTile() {
+        return activeService != null;
+    }
+
+    static boolean isRecordingForTile() {
+        RomanVoiceFloatingService service = activeService;
+        return service != null && service.recording;
+    }
+
+    static TileState getTileStateForTile() {
+        RomanVoiceFloatingService service = activeService;
+        if (service == null) {
+            return TileState.UNAVAILABLE;
+        }
+        if (service.recording) {
+            return TileState.LISTENING;
+        }
+        if (service.connecting) {
+            return TileState.CONNECTING;
+        }
+        return TileState.READY;
+    }
+
+    static boolean requestToggleFromTile() {
+        RomanVoiceFloatingService service = activeService;
+        if (service == null) {
+            return false;
+        }
+        service.mainHandler.post(service::toggleRecordingFromTile);
+        return true;
+    }
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        activeService = this;
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         showOverlay();
         setStatus("Ready");
+        notifyTileStateChanged();
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (!recording && statusView != null) {
+        if (!recording
+                && overlayView != null
+                && overlayView.getVisibility() == View.VISIBLE
+                && statusView != null) {
             AccessibilityNodeInfo node = findFocusedEditableNode();
             setStatus(node == null ? "Tap a text field" : "Ready");
             recycleNode(node);
@@ -75,6 +123,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     public void onDestroy() {
         stopRecording(false);
         removeOverlay();
+        if (activeService == this) {
+            activeService = null;
+        }
+        notifyTileStateChanged();
         super.onDestroy();
     }
 
@@ -87,19 +139,36 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         overlayView.setOrientation(LinearLayout.HORIZONTAL);
         overlayView.setGravity(Gravity.CENTER_VERTICAL);
         overlayView.setPadding(dp(8), dp(6), dp(8), dp(6));
-        overlayView.setBackground(roundedBackground(0xEE25312C));
+        setPillColor(PILL_COLOR_IDLE);
 
         micButton = new Button(this);
         micButton.setText("RV");
         micButton.setTextColor(Color.WHITE);
+        micButton.setBackgroundColor(Color.TRANSPARENT);
+        micButton.setMinWidth(0);
+        micButton.setMinHeight(0);
+        micButton.setPadding(0, 0, 0, 0);
         micButton.setOnClickListener(view -> toggleRecording());
+        micButton.setOnLongClickListener(view -> {
+            cancelRecording();
+            return true;
+        });
         overlayView.addView(micButton, new LinearLayout.LayoutParams(dp(54), dp(46)));
+
+        cancelButton = new Button(this);
+        cancelButton.setText("X");
+        cancelButton.setTextColor(Color.WHITE);
+        cancelButton.setContentDescription("Cancel dictation");
+        cancelButton.setVisibility(View.GONE);
+        cancelButton.setOnClickListener(view -> cancelRecording());
+        overlayView.addView(cancelButton, new LinearLayout.LayoutParams(dp(46), dp(46)));
 
         statusView = new TextView(this);
         statusView.setTextColor(Color.WHITE);
         statusView.setTextSize(12f);
         statusView.setSingleLine(true);
         statusView.setPadding(dp(8), 0, dp(2), 0);
+        statusView.setVisibility(View.GONE);
         overlayView.addView(statusView, new LinearLayout.LayoutParams(dp(116), dp(46)));
 
         overlayView.setOnTouchListener(new DragTouchListener());
@@ -116,6 +185,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         overlayParams.y = dp(160);
 
         windowManager.addView(overlayView, overlayParams);
+        overlayView.setVisibility(View.GONE);
     }
 
     private void removeOverlay() {
@@ -133,16 +203,21 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
     }
 
+    private void toggleRecordingFromTile() {
+        toggleRecording();
+    }
+
     private void startRecording() {
         if (!hasRecordPermission()) {
-            setStatus("Grant mic");
+            showIdleNotice("Grant mic");
             openSettings();
             return;
         }
 
         AccessibilityNodeInfo target = findFocusedEditableNode();
         if (target == null) {
-            setStatus("Tap a field");
+            Log.i(TAG, "Tile/start ignored: no focused editable field");
+            showIdleNotice("Tap a text field first");
             return;
         }
         captureInsertionState(target);
@@ -151,18 +226,24 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         String streamUrl = RomanVoicePreferences.streamUrl(this);
         String token = RomanVoicePreferences.token(this);
         if (streamUrl == null || streamUrl.trim().isEmpty() || streamUrl.contains("100.x.x.x")) {
-            setStatus("Set URL");
+            showIdleNotice("Set URL");
             openSettings();
             return;
         }
         if (token == null || token.trim().isEmpty()) {
-            setStatus("Set token");
+            showIdleNotice("Set token");
             openSettings();
             return;
         }
 
+        connecting = true;
+        notifyTileStateChanged();
         setStatus("Connecting");
+        setPillState(PILL_COLOR_CONNECTING, true);
         micButton.setEnabled(false);
+        if (cancelButton != null) {
+            cancelButton.setVisibility(View.GONE);
+        }
 
         new Thread(() -> {
             try {
@@ -177,17 +258,19 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 client = streamClient;
                 startAudioPump();
                 mainHandler.post(() -> {
-                    micButton.setText("Stop");
-                    micButton.setEnabled(true);
-                    setStatus("Listening");
+                    connecting = false;
+                    setRecordingControls(true);
+                    notifyTileStateChanged();
                 });
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice floating connection failed", exception);
                 cleanupClient();
                 mainHandler.post(() -> {
-                    micButton.setText("RV");
-                    micButton.setEnabled(true);
+                    connecting = false;
+                    setRecordingControls(false);
                     setStatus(shortError(exception));
+                    setPillColor(PILL_COLOR_ERROR);
+                    notifyTileStateChanged();
                 });
             }
         }, "RomanVoiceFloatConnect").start();
@@ -234,11 +317,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void stopRecording(boolean requestFinal) {
         boolean wasRecording = recording;
         recording = false;
+        connecting = false;
         stopAudioRecord();
+        notifyTileStateChanged();
 
         if (requestFinal && client != null) {
             setStatus("Finishing");
+            setPillState(PILL_COLOR_RECORDED, true);
             micButton.setEnabled(false);
+            if (cancelButton != null) {
+                cancelButton.setVisibility(View.GONE);
+            }
             new Thread(() -> {
                 try {
                     client.sendStop();
@@ -250,12 +339,31 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             cleanupClient();
             if (wasRecording) {
                 mainHandler.post(() -> {
-                    micButton.setText("RV");
-                    micButton.setEnabled(true);
+                    setRecordingControls(false);
                     setStatus("Ready");
+                    notifyTileStateChanged();
                 });
             }
         }
+    }
+
+    private void cancelRecording() {
+        boolean hadClient = client != null;
+        boolean wasRecording = recording;
+        recording = false;
+        connecting = false;
+        stopAudioRecord();
+        removeLiveDictationText();
+        cleanupClient();
+        setRecordingControls(false);
+        setPillColor(PILL_COLOR_IDLE);
+        resetLiveDictationState();
+        if (wasRecording || hadClient) {
+            setStatus("Canceled");
+        } else {
+            setStatus("Ready");
+        }
+        notifyTileStateChanged();
     }
 
     private void stopAudioRecord() {
@@ -273,31 +381,34 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void handlePartial(String text) {
         String next = text == null ? "" : text;
         writeDictationText(next);
-        lastDictationText = next;
-        setStatus("Listening");
     }
 
     private void handleFinal(String text) {
         stopAudioRecord();
+        recording = false;
+        connecting = false;
         String finalText = text == null ? "" : text;
         if (!finalText.equals(lastDictationText)) {
             writeDictationText(finalText);
         }
         cleanupClient();
-        micButton.setText("RV");
-        micButton.setEnabled(true);
+        setRecordingControls(false);
         setStatus(finalText.isEmpty() ? "No speech" : "Ready");
-        lastDictationText = "";
+        setPillColor(finalText.isEmpty() ? PILL_COLOR_ERROR : PILL_COLOR_RECORDED);
+        resetLiveDictationState();
+        notifyTileStateChanged();
     }
 
     private void handleStreamError(String message) {
         recording = false;
+        connecting = false;
         stopAudioRecord();
         cleanupClient();
-        micButton.setText("RV");
-        micButton.setEnabled(true);
+        setRecordingControls(false);
         setStatus(message == null || message.isEmpty() ? "Offline" : message);
-        lastDictationText = "";
+        setPillColor(PILL_COLOR_ERROR);
+        resetLiveDictationState();
+        notifyTileStateChanged();
     }
 
     private void writeDictationText(String dictationText) {
@@ -307,10 +418,14 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             return;
         }
 
+        String currentText = getEditableText(target);
+        int[] range = resolveReplacementRange(target, currentText);
+        int start = range[0];
+        int end = range[1];
         String nextText =
-                baseText.substring(0, insertionStart)
+                currentText.substring(0, start)
                         + dictationText
-                        + baseText.substring(insertionEnd);
+                        + currentText.substring(end);
         Bundle arguments = new Bundle();
         arguments.putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -318,7 +433,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         );
         boolean changed = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
         if (changed) {
-            int cursor = insertionStart + dictationText.length();
+            insertionStart = start;
+            insertionEnd = start + dictationText.length();
+            lastDictationText = dictationText;
+            int cursor = insertionEnd;
             Bundle selection = new Bundle();
             selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor);
             selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor);
@@ -330,22 +448,94 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void captureInsertionState(AccessibilityNodeInfo node) {
-        baseText = getEditableText(node);
+        String currentText = getEditableText(node);
 
         int start = node.getTextSelectionStart();
         int end = node.getTextSelectionEnd();
         if (start < 0 || end < 0) {
-            start = baseText.length();
+            start = currentText.length();
             end = start;
         }
-        insertionStart = Math.max(0, Math.min(start, baseText.length()));
-        insertionEnd = Math.max(0, Math.min(end, baseText.length()));
+        insertionStart = clamp(start, 0, currentText.length());
+        insertionEnd = clamp(end, 0, currentText.length());
         if (insertionStart > insertionEnd) {
             int previousStart = insertionStart;
             insertionStart = insertionEnd;
             insertionEnd = previousStart;
         }
         lastDictationText = "";
+    }
+
+    private int[] resolveReplacementRange(AccessibilityNodeInfo node, String currentText) {
+        int[] liveRange = findLiveDictationRange(currentText);
+        if (liveRange != null) {
+            return liveRange;
+        }
+
+        int start = node.getTextSelectionStart();
+        int end = node.getTextSelectionEnd();
+        if (start < 0 || end < 0) {
+            start = clamp(insertionEnd, 0, currentText.length());
+            end = start;
+        }
+
+        start = clamp(start, 0, currentText.length());
+        end = clamp(end, 0, currentText.length());
+        if (start > end) {
+            int previousStart = start;
+            start = end;
+            end = previousStart;
+        }
+        return new int[]{start, end};
+    }
+
+    private int[] findLiveDictationRange(String currentText) {
+        return RomanVoiceTextRange.findLiveDictationRange(
+                currentText,
+                insertionStart,
+                insertionEnd,
+                lastDictationText
+        );
+    }
+
+    private void removeLiveDictationText() {
+        AccessibilityNodeInfo target = findFocusedEditableNode();
+        if (target == null || lastDictationText.isEmpty()) {
+            recycleNode(target);
+            return;
+        }
+
+        String currentText = getEditableText(target);
+        int[] range = findLiveDictationRange(currentText);
+        if (range == null) {
+            recycleNode(target);
+            return;
+        }
+
+        String nextText = currentText.substring(0, range[0]) + currentText.substring(range[1]);
+        Bundle arguments = new Bundle();
+        arguments.putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                nextText
+        );
+        boolean changed = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
+        if (changed) {
+            Bundle selection = new Bundle();
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, range[0]);
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, range[0]);
+            target.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
+        }
+        recycleNode(target);
+    }
+
+    private void resetLiveDictationState() {
+        insertionStart = 0;
+        insertionEnd = 0;
+        lastDictationText = "";
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(value, max));
     }
 
     private String getEditableText(AccessibilityNodeInfo node) {
@@ -424,6 +614,53 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
     }
 
+    private void showIdleNotice(String text) {
+        setStatus(text);
+        setPillColor(PILL_COLOR_ERROR);
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+        if (overlayView == null) {
+            return;
+        }
+        overlayView.setVisibility(View.VISIBLE);
+        if (hideIdleOverlayRunnable != null) {
+            mainHandler.removeCallbacks(hideIdleOverlayRunnable);
+        }
+        hideIdleOverlayRunnable = () -> {
+            if (!recording && !connecting && overlayView != null) {
+                overlayView.setVisibility(View.GONE);
+            }
+        };
+        mainHandler.postDelayed(hideIdleOverlayRunnable, 1800);
+    }
+
+    private void setRecordingControls(boolean isRecording) {
+        setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording);
+        if (micButton != null) {
+            micButton.setText(isRecording ? "Stop" : "RV");
+            micButton.setEnabled(true);
+        }
+        if (cancelButton != null) {
+            cancelButton.setVisibility(SHOW_CANCEL_BUTTON && isRecording ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void setPillState(int color, boolean visible) {
+        setPillColor(color);
+        if (overlayView != null) {
+            overlayView.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void setPillColor(int color) {
+        if (overlayView != null) {
+            overlayView.setBackground(roundedBackground(color));
+        }
+    }
+
+    private void notifyTileStateChanged() {
+        RomanVoiceTileService.requestStateUpdate(this);
+    }
+
     private String shortError(Exception exception) {
         String message = exception.getMessage();
         if (message == null || message.trim().isEmpty()) {
@@ -443,7 +680,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void recycleNode(AccessibilityNodeInfo node) {
-        if (node != null) {
+        if (node != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             node.recycle();
         }
     }
@@ -494,13 +731,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         @Override
         public void onReady() {
             Log.i(TAG, "RomanVoice floating stream ready");
-            mainHandler.post(() -> setStatus("Connected"));
+            mainHandler.post(() -> setPillColor(PILL_COLOR_CONNECTING));
         }
 
         @Override
         public void onStarted() {
             Log.i(TAG, "RomanVoice floating stream started");
-            mainHandler.post(() -> setStatus("Listening"));
+            mainHandler.post(() -> setPillState(PILL_COLOR_RECORDING, true));
         }
 
         @Override

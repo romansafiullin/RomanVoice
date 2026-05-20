@@ -32,12 +32,14 @@ public class RomanVoiceImeService extends InputMethodService {
 
     private TextView statusView;
     private Button micButton;
+    private Button cancelButton;
     private Button nextKeyboardButton;
 
     private volatile boolean recording;
     private AudioRecord audioRecord;
     private Thread audioThread;
     private RomanVoiceStreamClient client;
+    private String lastPartialText = "";
 
     @Override
     public View onCreateInputView() {
@@ -71,6 +73,12 @@ public class RomanVoiceImeService extends InputMethodService {
         micButton.setText("Mic");
         micButton.setOnClickListener(view -> toggleRecording());
         actionRow.addView(micButton, new LinearLayout.LayoutParams(0, dp(56), 1f));
+
+        cancelButton = new Button(this);
+        cancelButton.setText("Cancel");
+        cancelButton.setVisibility(View.GONE);
+        cancelButton.setOnClickListener(view -> cancelRecording());
+        actionRow.addView(cancelButton, new LinearLayout.LayoutParams(0, dp(56), 1f));
 
         nextKeyboardButton = new Button(this);
         nextKeyboardButton.setText("Keyboard");
@@ -123,6 +131,9 @@ public class RomanVoiceImeService extends InputMethodService {
 
         setStatus("Connecting");
         micButton.setEnabled(false);
+        if (cancelButton != null) {
+            cancelButton.setVisibility(View.GONE);
+        }
 
         new Thread(() -> {
             try {
@@ -137,16 +148,14 @@ public class RomanVoiceImeService extends InputMethodService {
                 client = streamClient;
                 startAudioPump();
                 mainHandler.post(() -> {
-                    micButton.setText("Stop");
-                    micButton.setEnabled(true);
+                    setRecordingControls(true);
                     setStatus("Listening");
                 });
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice stream connection failed", exception);
                 cleanupClient();
                 mainHandler.post(() -> {
-                    micButton.setText("Mic");
-                    micButton.setEnabled(true);
+                    setRecordingControls(false);
                     setStatus(shortError(exception));
                 });
             }
@@ -199,6 +208,9 @@ public class RomanVoiceImeService extends InputMethodService {
         if (requestFinal && client != null) {
             setStatus("Finishing");
             micButton.setEnabled(false);
+            if (cancelButton != null) {
+                cancelButton.setVisibility(View.GONE);
+            }
             new Thread(() -> {
                 try {
                     client.sendStop();
@@ -210,12 +222,23 @@ public class RomanVoiceImeService extends InputMethodService {
             cleanupClient();
             if (wasRecording) {
                 mainHandler.post(() -> {
-                    micButton.setText("Mic");
-                    micButton.setEnabled(true);
+                    setRecordingControls(false);
                     setStatus("Ready");
                 });
             }
         }
+    }
+
+    private void cancelRecording() {
+        boolean hadClient = client != null;
+        boolean wasRecording = recording;
+        recording = false;
+        stopAudioRecord();
+        clearComposingText();
+        cleanupClient();
+        setRecordingControls(false);
+        lastPartialText = "";
+        setStatus(wasRecording || hadClient ? "Canceled" : "Ready");
     }
 
     private void stopAudioRecord() {
@@ -231,9 +254,10 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void handlePartial(String text) {
+        lastPartialText = text == null ? "" : text;
         InputConnection connection = getCurrentInputConnection();
         if (connection != null) {
-            connection.setComposingText(text == null ? "" : text, 1);
+            connection.setComposingText(lastPartialText, 1);
         }
         setStatus("Listening");
     }
@@ -244,14 +268,14 @@ public class RomanVoiceImeService extends InputMethodService {
         InputConnection connection = getCurrentInputConnection();
         if (connection != null) {
             if (finalText.isEmpty()) {
-                connection.finishComposingText();
+                clearComposingText();
             } else {
                 connection.commitText(finalText, 1);
             }
         }
         cleanupClient();
-        micButton.setText("Mic");
-        micButton.setEnabled(true);
+        setRecordingControls(false);
+        lastPartialText = "";
         setStatus(finalText.isEmpty() ? "No speech detected" : "Ready");
     }
 
@@ -259,12 +283,9 @@ public class RomanVoiceImeService extends InputMethodService {
         recording = false;
         stopAudioRecord();
         cleanupClient();
-        InputConnection connection = getCurrentInputConnection();
-        if (connection != null) {
-            connection.finishComposingText();
-        }
-        micButton.setText("Mic");
-        micButton.setEnabled(true);
+        clearComposingText();
+        setRecordingControls(false);
+        lastPartialText = "";
         setStatus(message == null || message.isEmpty() ? "RomanVoice offline" : message);
     }
 
@@ -333,6 +354,27 @@ public class RomanVoiceImeService extends InputMethodService {
         if (statusView != null) {
             statusView.setText(text);
         }
+    }
+
+    private void setRecordingControls(boolean isRecording) {
+        if (micButton != null) {
+            micButton.setText(isRecording ? "Stop" : "Mic");
+            micButton.setEnabled(true);
+        }
+        if (cancelButton != null) {
+            cancelButton.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void clearComposingText() {
+        InputConnection connection = getCurrentInputConnection();
+        if (connection == null) {
+            return;
+        }
+        if (!lastPartialText.isEmpty()) {
+            connection.setComposingText("", 1);
+        }
+        connection.finishComposingText();
     }
 
     private String shortError(Exception exception) {

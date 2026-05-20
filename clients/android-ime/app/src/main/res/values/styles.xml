@@ -5,4 +5,10 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:colorAccent">#2F6F5E</item>
     </style>
+    <style name="TileActionTheme" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowNoDisplay">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>

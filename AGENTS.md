@@ -53,7 +53,11 @@ product or architecture direction.
 - The Android client in `clients/android-ime` has two phone input surfaces: a
   full RomanVoice IME and an opt-in `RomanVoice Floating Mic` accessibility
   service that keeps SwiftKey/Gboard active while inserting text into the
-  focused editable field.
+  focused editable field. The preferred phone trigger is the `RomanVoice` Quick
+  Settings tile, which delegates to the floating service for focused-field
+  insertion and shows `Connecting` / `Listening` / `Ready` state. Keep the
+  floating overlay hidden while idle and visible while recording only as a small
+  status/cancel affordance.
 - The known preferred microphone path is the WASAPI default resolving to
   `Microphone (3- Razer Kiyo)` when that device is present.
 - The currently working startup fallback is the Startup-folder VBS watchdog:
@@ -79,6 +83,8 @@ product or architecture direction.
 - Avoid duplicate insertion. If partial live text was already typed and final
   reconciliation fails, do not blindly paste the full final transcript on top of
   the partial text.
+- Keep an explicit cancel path available on Android dictation surfaces so a bad
+  utterance can be aborted without committing the final transcript.
 
 ## Feature Gates
 

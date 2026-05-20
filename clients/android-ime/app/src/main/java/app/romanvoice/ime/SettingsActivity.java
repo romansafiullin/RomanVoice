@@ -2,8 +2,12 @@ package app.romanvoice.ime;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.StatusBarManager;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
@@ -15,6 +19,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 public class SettingsActivity extends Activity {
     private static final int RECORD_AUDIO_REQUEST = 42;
@@ -75,6 +80,11 @@ public class SettingsActivity extends Activity {
         accessibilityButton.setOnClickListener(view -> openAccessibilitySettings());
         root.addView(accessibilityButton, matchWidth());
 
+        Button tileButton = new Button(this);
+        tileButton.setText("Add RomanVoice Quick Settings tile");
+        tileButton.setOnClickListener(view -> requestQuickSettingsTile());
+        root.addView(tileButton, matchWidth());
+
         Button saveButton = new Button(this);
         saveButton.setText("Save");
         saveButton.setOnClickListener(view -> {
@@ -118,6 +128,40 @@ public class SettingsActivity extends Activity {
 
     private void openAccessibilitySettings() {
         startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
+    private void requestQuickSettingsTile() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Toast.makeText(this, "Add RomanVoice from the Quick Settings editor", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        StatusBarManager statusBarManager = getSystemService(StatusBarManager.class);
+        if (statusBarManager == null) {
+            Toast.makeText(this, "Quick Settings tile prompt is unavailable", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        statusBarManager.requestAddTileService(
+                new ComponentName(this, RomanVoiceTileService.class),
+                getString(R.string.tile_service_name),
+                Icon.createWithResource(this, R.drawable.ic_romanvoice_tile),
+                getMainExecutor(),
+                result -> Toast.makeText(this, tilePromptResult(result), Toast.LENGTH_SHORT).show()
+        );
+    }
+
+    private String tilePromptResult(int result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return "";
+        }
+        if (result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
+            return "RomanVoice tile added";
+        }
+        if (result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
+            return "RomanVoice tile is already added";
+        }
+        return "RomanVoice tile was not added";
     }
 
     private int dp(int value) {
