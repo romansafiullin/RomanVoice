@@ -22,6 +22,24 @@ def test_phone_installer_recovers_from_debug_signature_mismatch():
     assert "uninstall app.romanvoice.ime" in script
 
 
+def test_phone_installer_defaults_to_floating_mic_workflow():
+    script = (ANDROID_IME_ROOT / "install-to-connected-phone.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[bool]$EnableFloatingMic = $true" in script
+    assert "[switch]$SetRomanVoiceKeyboard" in script
+    assert "Enable-FloatingMicService" in script
+    assert "expandedComponent" in script
+    assert "enabled_accessibility_services \"$next\"" in script
+    assert "not enabled by Android" in script
+    assert "Resolve-NormalKeyboard" in script
+    preinstall_stop = "& $Adb shell am force-stop app.romanvoice.ime | Out-Null"
+    assert script.index(preinstall_stop) < script.rindex("Install-DebugApk")
+    assert "ime set app.romanvoice.ime/.RomanVoiceImeService" in script
+    assert "if ($SetRomanVoiceKeyboard)" in script
+
+
 def test_android_manifest_declares_floating_accessibility_service():
     manifest = (ANDROID_IME_ROOT / "app" / "src" / "main" / "AndroidManifest.xml").read_text(
         encoding="utf-8"

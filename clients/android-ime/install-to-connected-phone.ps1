@@ -2,7 +2,10 @@ param(
     [string]$AndroidSdkRoot = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }),
     [string]$StreamUrl = "",
     [string]$TokenFile = $(Join-Path $env:APPDATA 'RomanVoice\service_token.txt'),
-    [string]$Polish = "settings"
+    [string]$Polish = "settings",
+    [string]$PreferredKeyboard = "",
+    [bool]$EnableFloatingMic = $true,
+    [switch]$SetRomanVoiceKeyboard
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +41,8 @@ $Devices = & $Adb devices | Select-String "`tdevice$"
 if (-not $Devices) {
     throw "No authorized Android device is connected. Plug in the Pixel, enable USB debugging, and approve the phone prompt."
 }
+
+$PreviousKeyboard = (& $Adb shell settings get secure default_input_method).Trim()
 
 $Token = (Get-Content -Raw -Path $TokenFile).Trim()
 if (-not $Token) {
@@ -81,9 +86,60 @@ function Install-DebugApk {
     }
 }
 
+function Enable-FloatingMicService {
+    $component = "app.romanvoice.ime/.RomanVoiceFloatingService"
+    $expandedComponent = "app.romanvoice.ime/app.romanvoice.ime.RomanVoiceFloatingService"
+    $current = (& $Adb shell settings get secure enabled_accessibility_services).Trim()
+    if ($current -eq "null") {
+        $current = ""
+    }
+
+    $services = @()
+    if ($current) {
+        $services = @($current -split ":" | Where-Object { $_ })
+    }
+    $services = @($services | Where-Object { $_ -ne $component -and $_ -ne $expandedComponent })
+    $services += $expandedComponent
+
+    $next = ($services -join ":")
+    & $Adb shell settings put secure enabled_accessibility_services "$next" | Out-Null
+    & $Adb shell settings put secure accessibility_enabled 1 | Out-Null
+
+    Start-Sleep -Milliseconds 250
+    $readback = (& $Adb shell settings get secure enabled_accessibility_services).Trim()
+    if ($readback -notlike "*$expandedComponent*") {
+        throw "RomanVoice Floating Mic accessibility service was not enabled by Android. Open Accessibility settings and enable RomanVoice Floating Mic manually."
+    }
+}
+
+function Resolve-NormalKeyboard {
+    if ($PreferredKeyboard) {
+        return $PreferredKeyboard
+    }
+
+    if ($PreviousKeyboard -and $PreviousKeyboard -ne "null" -and $PreviousKeyboard -notlike "app.romanvoice.ime/*") {
+        return $PreviousKeyboard
+    }
+
+    $enabledInputMethods = @(& $Adb shell ime list -s)
+    foreach ($candidate in @(
+        "com.touchtype.swiftkey/com.touchtype.KeyboardService",
+        "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME"
+    )) {
+        if ($enabledInputMethods -contains $candidate) {
+            return $candidate
+        }
+    }
+
+    return ""
+}
+
 $TempPrefs = Join-Path $env:TEMP "romanvoice_ime.xml"
 Set-Content -Path $TempPrefs -Value $Prefs -Encoding UTF8
 
+# Stop the package before updating it; an active accessibility service can keep
+# the APK install transaction open until adb is killed.
+& $Adb shell am force-stop app.romanvoice.ime | Out-Null
 Install-DebugApk
 
 & $Adb shell pm grant app.romanvoice.ime android.permission.RECORD_AUDIO | Out-Null
@@ -93,9 +149,26 @@ Install-DebugApk
 & $Adb shell run-as app.romanvoice.ime chmod 600 shared_prefs/romanvoice_ime.xml | Out-Null
 & $Adb shell am force-stop app.romanvoice.ime | Out-Null
 & $Adb shell ime enable app.romanvoice.ime/.RomanVoiceImeService | Out-Null
-& $Adb shell ime set app.romanvoice.ime/.RomanVoiceImeService | Out-Null
+if ($SetRomanVoiceKeyboard) {
+    & $Adb shell ime set app.romanvoice.ime/.RomanVoiceImeService | Out-Null
+} else {
+    $normalKeyboard = Resolve-NormalKeyboard
+    if ($normalKeyboard) {
+        & $Adb shell ime set $normalKeyboard | Out-Null
+    }
+}
+if ($EnableFloatingMic) {
+    Enable-FloatingMicService
+}
 & $Adb shell am start -n app.romanvoice.ime/.SettingsActivity | Out-Null
 
 Write-Output "Installed RomanVoice IME."
 Write-Output "Stream URL: $StreamUrl"
-Write-Output "RomanVoice was requested as the current keyboard. If Android blocks that, open keyboard settings and select RomanVoice."
+if ($SetRomanVoiceKeyboard) {
+    Write-Output "RomanVoice was requested as the current keyboard. If Android blocks that, open keyboard settings and select RomanVoice."
+} else {
+    Write-Output "Normal keyboard preserved/restored for floating mic use. Pass -SetRomanVoiceKeyboard to use the full RomanVoice keyboard."
+}
+if ($EnableFloatingMic) {
+    Write-Output "RomanVoice Floating Mic accessibility service was enabled and verified via ADB."
+}

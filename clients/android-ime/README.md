@@ -68,7 +68,10 @@ For command-line install after USB debugging is enabled:
 
 The install script reads `%APPDATA%\RomanVoice\service_token.txt`, installs the
 debug APK, grants microphone permission, and preloads the IME settings with this
-PC's LAN URL. It also asks Android to switch the current keyboard to RomanVoice.
+PC's LAN URL. By default it preserves or restores the normal keyboard, preferring
+SwiftKey when RomanVoice was already active, and enables/verifies the floating
+mic service through ADB for development testing. Pass `-SetRomanVoiceKeyboard`
+when you want the full RomanVoice keyboard selected instead.
 The debug APK is signed with a durable local keystore at
 `%APPDATA%\RomanVoice\android-ime-debug.keystore` so later local rebuilds can
 update the installed app without a clean uninstall. If a mismatched older debug
