@@ -393,6 +393,8 @@ class LocalWhisperBackend(TranscriptionBackend):
         if text and text[-1] not in ".!?…":
             text += "."
 
+        text = LocalWhisperBackend._trim_repeated_tail_sentences(text)
+
         return text
 
     @staticmethod
@@ -427,6 +429,37 @@ class LocalWhisperBackend(TranscriptionBackend):
             elif not char.isspace() and char not in "\"'“”‘’([{":
                 capitalize_next = False
         return "".join(chars)
+
+    @staticmethod
+    def _trim_repeated_tail_sentences(text: str) -> str:
+        sentences = re.findall(r"\s*[^.!?…]+[.!?…]+", text or "")
+        if len(sentences) < 4:
+            return text
+
+        last = LocalWhisperBackend._normalize_repeated_sentence(sentences[-1])
+        if not last:
+            return text
+
+        repeated_count = 1
+        for sentence in reversed(sentences[:-1]):
+            if LocalWhisperBackend._normalize_repeated_sentence(sentence) != last:
+                break
+            repeated_count += 1
+
+        if repeated_count < 4:
+            return text
+
+        keep_count = len(sentences) - repeated_count + 1
+        trimmed = "".join(sentences[:keep_count]).strip()
+        logger.info(
+            "Trimmed repeated transcript tail sentence (%s repeated copies removed)",
+            repeated_count - 1,
+        )
+        return trimmed or text
+
+    @staticmethod
+    def _normalize_repeated_sentence(sentence: str) -> str:
+        return re.sub(r"\W+", " ", sentence or "").strip().lower()
 
     def reload_model(self, model_name: str = None):
         """Reload the Whisper model with a different model name.

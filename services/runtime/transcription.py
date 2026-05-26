@@ -88,8 +88,6 @@ class TranscriptionRuntime:
             return
 
         self.controller.recording_state_changed.emit(False)
-        self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
-        self.controller.status_update.emit("Processing...")
 
         if not self.controller.recorder.wait_for_stop_completion():
             logger.warning(
@@ -143,6 +141,12 @@ class TranscriptionRuntime:
             self.controller.recorder.get_recording_duration()
         )
         self.controller._pending_file_size = file_size
+
+        if self._complete_short_form_from_streaming():
+            return
+
+        self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
+        self.controller.status_update.emit("Processing...")
 
         try:
             self._submit_transcription_job(config.RECORDED_AUDIO_FILE)
@@ -522,10 +526,7 @@ class TranscriptionRuntime:
         context: str,
     ) -> str:
         final_text = (transcript or "").strip()
-        streaming_text = self.controller._last_streaming_text.strip()
-        best_streaming_text = getattr(self.controller, "_best_streaming_text", "").strip()
-        if len(best_streaming_text) > len(streaming_text):
-            streaming_text = best_streaming_text
+        streaming_text = self._best_streaming_text()
         if not streaming_text:
             return final_text
 
@@ -636,6 +637,36 @@ class TranscriptionRuntime:
 
     def _is_current_job(self, job_id: int) -> bool:
         return job_id == self.controller._transcription_job_id
+
+    def _complete_short_form_from_streaming(self) -> bool:
+        duration = self.controller._pending_audio_duration or 0.0
+        streaming_text = self._best_streaming_text()
+        if (
+            0 < duration <= config.SHORT_FORM_FINAL_SKIP_MAX_SECONDS
+            and len(streaming_text) >= config.SHORT_FORM_FINAL_SKIP_MIN_CHARS
+        ):
+            self.controller._transcription_job_id += 1
+            self.controller._streaming_guard_evaluated = True
+            self.controller._transcription_start_time = time.time()
+            self.controller.overlay_state_update.emit(OverlayState.NONE)
+            logger.info(
+                "Skipping final transcription for short streaming dictation "
+                "(duration=%.2fs, streaming_chars=%s)",
+                duration,
+                len(streaming_text),
+            )
+            self.controller.transcription_completed.emit(streaming_text)
+            return True
+        return False
+
+    def _best_streaming_text(self) -> str:
+        streaming_text = (self.controller._last_streaming_text or "").strip()
+        best_streaming_text = (
+            getattr(self.controller, "_best_streaming_text", "") or ""
+        ).strip()
+        if len(best_streaming_text) > len(streaming_text):
+            return best_streaming_text
+        return streaming_text
 
     def _get_active_transcription_backend(self):
         return (

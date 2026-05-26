@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ class GPUStatus:
     utilization_percent: Optional[int] = None
     memory_used_mb: Optional[int] = None
     memory_total_mb: Optional[int] = None
+    self_memory_used_mb: Optional[int] = None
     error: Optional[str] = None
 
     @property
@@ -28,6 +30,16 @@ class GPUStatus:
         if self.memory_used_mb is None or self.memory_total_mb is None:
             return None
         return max(0, self.memory_total_mb - self.memory_used_mb)
+
+    @property
+    def effective_memory_free_mb(self) -> Optional[int]:
+        """Free memory after discounting this RomanVoice process, when known."""
+        free_mb = self.memory_free_mb
+        if free_mb is None:
+            return None
+        if not config.GPU_IGNORE_OWN_CUDA_MEMORY or not self.self_memory_used_mb:
+            return free_mb
+        return min(self.memory_total_mb or free_mb, free_mb + self.self_memory_used_mb)
 
     def busy_reason(self) -> Optional[str]:
         """Return a human-readable reason when CUDA should be avoided."""
@@ -41,9 +53,19 @@ class GPUStatus:
         ):
             reasons.append(f"utilization {self.utilization_percent}%")
 
-        free_mb = self.memory_free_mb
+        free_mb = self.effective_memory_free_mb
         if free_mb is not None and free_mb < config.GPU_MIN_FREE_MEMORY_MB:
-            reasons.append(f"free memory {free_mb} MB")
+            if (
+                config.GPU_IGNORE_OWN_CUDA_MEMORY
+                and self.self_memory_used_mb
+                and self.memory_free_mb != free_mb
+            ):
+                reasons.append(
+                    f"free memory {free_mb} MB after excluding RomanVoice "
+                    f"{self.self_memory_used_mb} MB"
+                )
+            else:
+                reasons.append(f"free memory {free_mb} MB")
 
         return ", ".join(reasons) if reasons else None
 
@@ -99,7 +121,57 @@ class GPUGuard:
             utilization_percent=utilization,
             memory_used_mb=memory_used,
             memory_total_mb=memory_total,
+            self_memory_used_mb=self._query_self_cuda_memory_mb(),
         )
+
+    def _query_self_cuda_memory_mb(self) -> Optional[int]:
+        """Return CUDA memory held by this process, if nvidia-smi exposes it."""
+        if not config.GPU_IGNORE_OWN_CUDA_MEMORY:
+            return None
+
+        try:
+            creationflags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            result = subprocess.run(
+                [
+                    "nvidia-smi.exe",
+                    "--query-compute-apps=pid,used_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=config.GPU_QUERY_TIMEOUT_MS / 1000,
+                creationflags=creationflags,
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("Could not query RomanVoice CUDA memory: %s", exc)
+            return None
+
+        if result.returncode != 0:
+            logger.debug(
+                "Could not query RomanVoice CUDA memory: %s",
+                (result.stderr or result.stdout or "").strip(),
+            )
+            return None
+
+        current_pid = os.getpid()
+        total_mb = 0
+        for line in (result.stdout or "").strip().splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+                used_mb = int(parts[1])
+            except ValueError:
+                continue
+            if pid == current_pid:
+                total_mb += max(0, used_mb)
+
+        return total_mb or None
 
     def is_cuda_busy(self) -> bool:
         """Return True when configured thresholds say to avoid CUDA."""

@@ -107,6 +107,7 @@ class FakeRecorder:
         self.audio_level_callback = None
         self.streaming_callback = None
         self.cleaned_up = False
+        self.duration = 12.5
 
     def set_audio_level_callback(self, callback):
         self.audio_level_callback = callback
@@ -133,7 +134,7 @@ class FakeRecorder:
         return True
 
     def get_recording_duration(self):
-        return 12.5
+        return self.duration
 
     def get_recording_signal_metrics(self):
         return {"rms": 1000.0, "peak": 1000, "samples": 1000}
@@ -358,6 +359,7 @@ class DummyUIController:
         self.streaming_overlay_hidden = 0
         self.caret_shown = 0
         self.caret_hidden = 0
+        self.overlay_states = []
 
     def update_hotkey_display(self, hotkeys):
         self.hotkeys = hotkeys
@@ -388,6 +390,9 @@ class DummyUIController:
 
     def clear_transcription_stats(self):
         self.stats = None
+
+    def set_overlay_state(self, state):
+        self.overlay_states.append(state)
 
     def set_transcript(self, text):
         self.transcription_text = text
@@ -565,6 +570,42 @@ class TestApplicationController(unittest.TestCase):
         controller.recorder.is_recording = True
         self.audio_processor.check_result = (False, 1.0)
         controller.stop_recording()
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
+        )
+
+    def test_stop_recording_skips_final_pass_for_short_streaming_dictation(self):
+        controller = self._create_controller()
+        live_text = "quick note from the live stream"
+        controller.recorder.is_recording = True
+        controller.recorder.duration = 5.31
+        controller.streaming_transcriber.stop_streaming = lambda: live_text
+        controller._live_typed_text = live_text
+
+        controller.stop_recording()
+
+        self.assertEqual(controller.executor.submissions, [])
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], live_text)
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            (live_text, live_text, 0),
+        )
+        overlay_values = [
+            getattr(state, "value", state)
+            for state in controller.ui_controller.overlay_states
+        ]
+        self.assertNotIn("processing", overlay_values)
+
+    def test_stop_recording_keeps_final_pass_when_short_streaming_text_is_too_short(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+        controller.recorder.duration = 5.31
+        controller.streaming_transcriber.stop_streaming = lambda: "too short"
+
+        controller.stop_recording()
+
         self.assertEqual(len(controller.executor.submissions), 1)
         self.assertEqual(
             controller.executor.submissions[0][0].__name__, "transcribe_audio_file"

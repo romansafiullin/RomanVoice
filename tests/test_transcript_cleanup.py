@@ -25,3 +25,14 @@ def test_light_cleanup_normalizes_time_meridiems_before_capitalization():
     assert LocalWhisperBackend._clean_transcript_text("4 a. m.") == "4 AM."
     assert LocalWhisperBackend._clean_transcript_text("meet me at 4 p.m.") == "Meet me at 4 PM."
     assert LocalWhisperBackend._clean_transcript_text("the call is at 10:30 pm") == "The call is at 10:30 PM."
+
+
+def test_light_cleanup_trims_repeated_tail_sentence_hallucination():
+    text = (
+        "i just need to look at something real quick. "
+        + "one second, sorry. " * 22
+    )
+
+    assert LocalWhisperBackend._clean_transcript_text(text) == (
+        "I just need to look at something real quick. One second, sorry."
+    )
