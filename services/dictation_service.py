@@ -22,6 +22,7 @@ import numpy as np
 from config import config, ensure_service_token
 from services.polisher import local_polisher
 from services.settings import SettingsKey, settings_manager
+from services.streaming_transcript_guard import choose_streaming_transcript
 from services.streaming_transcriber import StreamingTranscriber
 from services.websocket_protocol import WebSocketConnection, WebSocketProtocolError
 
@@ -316,27 +317,6 @@ class RomanVoiceDictationService:
             "sample_count": int(samples.size),
         }
 
-    @staticmethod
-    def _should_prefer_streaming_preview(
-        final_text: str,
-        rolling_text: str,
-        *,
-        duration_seconds: float,
-    ) -> bool:
-        final_text = (final_text or "").strip()
-        rolling_text = (rolling_text or "").strip()
-        if not final_text or not rolling_text:
-            return False
-
-        char_delta = len(rolling_text) - len(final_text)
-        final_ratio = len(final_text) / max(len(rolling_text), 1)
-        return (
-            duration_seconds >= config.LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS
-            and len(rolling_text) >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHARS
-            and char_delta >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHAR_DELTA
-            and final_ratio <= config.LONG_FORM_STREAMING_FALLBACK_RATIO
-        )
-
     def _transcribe_file(
         self,
         audio_path: Path,
@@ -440,20 +420,24 @@ class RomanVoiceDictationService:
                         self.controller._active_transcription_backend = backend
                         final_raw_text = backend.transcribe(str(temp_wav_path)).strip()
 
-                    if self._should_prefer_streaming_preview(
+                    decision = choose_streaming_transcript(
                         final_raw_text,
                         rolling_text,
                         duration_seconds=metrics["audio_duration_seconds"],
-                    ):
+                    )
+                    if decision.prefer_streaming:
                         raw_text = rolling_text
                         final_source = "streaming_preview_long_form_guard"
                         logger.warning(
                             "Using rolling phone stream transcript because final pass "
-                            "was much shorter (duration=%.1fs, rolling_chars=%s, "
-                            "final_chars=%s)",
+                            "looks truncated (reason=%s, duration=%.1fs, rolling_chars=%s, "
+                            "final_chars=%s, missing_prefix=%s, overlap=%s)",
+                            decision.reason,
                             metrics["audio_duration_seconds"],
                             len(rolling_text),
                             len(final_raw_text),
+                            decision.missing_prefix_chars,
+                            decision.overlap_chars,
                         )
                     elif final_raw_text:
                         raw_text = final_raw_text

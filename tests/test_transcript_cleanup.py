@@ -18,3 +18,10 @@ def test_light_cleanup_capitalizes_after_sentence_end():
     text = LocalWhisperBackend._clean_transcript_text("first sentence. second sentence")
 
     assert text == "First sentence. Second sentence."
+
+
+def test_light_cleanup_normalizes_time_meridiems_before_capitalization():
+    assert LocalWhisperBackend._clean_transcript_text("4 a.m.") == "4 AM."
+    assert LocalWhisperBackend._clean_transcript_text("4 a. m.") == "4 AM."
+    assert LocalWhisperBackend._clean_transcript_text("meet me at 4 p.m.") == "Meet me at 4 PM."
+    assert LocalWhisperBackend._clean_transcript_text("the call is at 10:30 pm") == "The call is at 10:30 PM."

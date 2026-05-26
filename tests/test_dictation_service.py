@@ -404,3 +404,62 @@ def test_service_streaming_prefers_long_preview_when_final_is_truncated(
     assert final["final_source"] == "streaming_preview_long_form_guard"
     assert final["audio_duration_seconds"] == 50.0
     assert backend.final_wave_info["frames"] == 800000
+
+
+def test_service_streaming_prefers_long_preview_when_final_drops_prefix(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    rolling_text = (
+        "Here are a couple of thoughts on labeling and new task creation. For example, "
+        "routine, colon, morning lunch is repeated twice. Not quite clear what it is. "
+        "No context. Open now for the first move makes no sense because there's no "
+        "accessible path there. Secondly, I just got an email from Panera about a pickup "
+        "order. It would be super useful if the PA could look into the email, gather that "
+        "information, the address, the order number, all the information related to that, "
+        "and put that on the VA so it could potentially be able to just tap it and get "
+        "directions and go and get the order. Stuff like that would be super helpful."
+    )
+    final_text = (
+        ", lunch. It's repeated twice. Not quite clear what it is. No context. Open now "
+        "for the first move makes no sense because there's no accessible path there. "
+        "Secondly, I just got an email from Panera about a pickup order. It would be "
+        "super useful if the PA could look into the email, gather that information, the "
+        "address, the order number, all the information related to that, and put that on "
+        "the PA so I could potentially be able to just tap it and get the directions and "
+        "go and get the order. Stuff like that would be super helpful."
+    )
+    backend = FakeStreamingBackend(final_text=final_text, rolling_text=rolling_text)
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        send_text(sock, {"type": "start", "sample_rate": 16000, "polish": "off"})
+        assert recv_server_json(sock)["type"] == "started"
+
+        send_binary(sock, (b"\x01\x00" * 1008000))
+        send_text(sock, {"type": "stop"})
+
+        while True:
+            payload = recv_server_json(sock)
+            if payload["type"] == "final":
+                final = payload
+                break
+        sock.close()
+    finally:
+        service.stop()
+
+    assert final["ok"] is True
+    assert final["text"] == rolling_text
+    assert final["raw_text"] == rolling_text
+    assert final["final_source"] == "streaming_preview_long_form_guard"
+    assert final["audio_duration_seconds"] == 63.0
+    assert backend.final_wave_info["frames"] == 1008000

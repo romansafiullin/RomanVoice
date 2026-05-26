@@ -15,6 +15,7 @@ from services.audio_processor import audio_processor
 from services.gpu_guard import gpu_guard
 from services.history_manager import history_manager
 from services.polisher import local_polisher
+from services.streaming_transcript_guard import choose_streaming_transcript
 from services.text_injector import text_injector
 from transcriber import LocalWhisperBackend
 try:
@@ -537,23 +538,24 @@ class TranscriptionRuntime:
             return streaming_text
 
         duration = self.controller._pending_audio_duration or 0.0
-        char_delta = len(streaming_text) - len(final_text)
-        final_ratio = len(final_text) / max(len(streaming_text), 1)
-        if (
-            duration >= config.LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS
-            and len(streaming_text) >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHARS
-            and char_delta >= config.LONG_FORM_STREAMING_FALLBACK_MIN_CHAR_DELTA
-            and final_ratio <= config.LONG_FORM_STREAMING_FALLBACK_RATIO
-        ):
+        decision = choose_streaming_transcript(
+            final_text,
+            streaming_text,
+            duration_seconds=duration,
+        )
+        if decision.prefer_streaming:
             logger.warning(
                 "Using streaming transcript for long-form %s because final pass "
-                "was much shorter (duration=%.1fs, streaming_chars=%s, "
-                "final_chars=%s, ratio=%.2f)",
+                "looks truncated (reason=%s, duration=%.1fs, streaming_chars=%s, "
+                "final_chars=%s, ratio=%.2f, missing_prefix=%s, overlap=%s)",
                 context,
+                decision.reason,
                 duration,
                 len(streaming_text),
                 len(final_text),
-                final_ratio,
+                decision.final_ratio,
+                decision.missing_prefix_chars,
+                decision.overlap_chars,
             )
             return streaming_text
 

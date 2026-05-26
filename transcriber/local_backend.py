@@ -383,8 +383,10 @@ class LocalWhisperBackend(TranscriptionBackend):
         if not text or not config.FASTER_WHISPER_LIGHT_CLEANUP:
             return text
 
+        text = LocalWhisperBackend._normalize_time_meridiems(text)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         text = re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
+        text = re.sub(r"\b(\d{1,2}):\s+(\d{2})\b", r"\1:\2", text)
         text = re.sub(r"\bi\b", "I", text)
         text = LocalWhisperBackend._capitalize_sentence_starts(text)
 
@@ -392,6 +394,24 @@ class LocalWhisperBackend(TranscriptionBackend):
             text += "."
 
         return text
+
+    @staticmethod
+    def _normalize_time_meridiems(text: str) -> str:
+        """Normalize Whisper's common AM/PM variants before sentence cleanup."""
+
+        def replace(match: re.Match) -> str:
+            hour = match.group("hour")
+            minutes = match.group("minutes") or ""
+            suffix = match.group("suffix").upper()
+            return f"{hour}{minutes} {suffix}M"
+
+        return re.sub(
+            r"\b(?P<hour>\d{1,2})(?P<minutes>:\d{2})?\s+"
+            r"(?P<suffix>[ap])\s*\.?\s*m\s*\.?\b",
+            replace,
+            text,
+            flags=re.IGNORECASE,
+        )
 
     @staticmethod
     def _capitalize_sentence_starts(text: str) -> str:

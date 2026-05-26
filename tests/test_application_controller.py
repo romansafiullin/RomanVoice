@@ -643,6 +643,41 @@ class TestApplicationController(unittest.TestCase):
             (streaming_text, streaming_text.strip(), 0),
         )
 
+    def test_transcription_complete_prefers_streaming_text_when_final_drops_prefix(self):
+        controller = self._create_controller()
+        streaming_text = (
+            "Here are a couple of thoughts on labeling and new task creation. For example, "
+            "routine, colon, morning lunch is repeated twice. Not quite clear what it is. "
+            "No context. Open now for the first move makes no sense because there's no "
+            "accessible path there. Secondly, I just got an email from Panera about a pickup "
+            "order. It would be super useful if the PA could look into the email, gather that "
+            "information, the address, the order number, all the information related to that, "
+            "and put that on the VA so it could potentially be able to just tap it and get "
+            "directions and go and get the order. Stuff like that would be super helpful."
+        )
+        final_text = (
+            ", lunch. It's repeated twice. Not quite clear what it is. No context. Open now "
+            "for the first move makes no sense because there's no accessible path there. "
+            "Secondly, I just got an email from Panera about a pickup order. It would be "
+            "super useful if the PA could look into the email, gather that information, the "
+            "address, the order number, all the information related to that, and put that on "
+            "the PA so I could potentially be able to just tap it and get the directions and "
+            "go and get the order. Stuff like that would be super helpful."
+        )
+        controller._pending_audio_duration = 63.4
+        controller._last_streaming_text = streaming_text
+        controller._best_streaming_text = streaming_text
+        controller._live_typed_text = streaming_text
+
+        controller._on_transcription_complete(final_text)
+
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], streaming_text)
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            (streaming_text, streaming_text, 0),
+        )
+
     def test_transcription_complete_keeps_final_text_for_short_recordings(self):
         controller = self._create_controller()
         streaming_text = "streaming phrase " * 40
