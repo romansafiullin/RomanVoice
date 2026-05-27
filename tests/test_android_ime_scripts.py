@@ -148,6 +148,45 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
 
 
+def test_floating_service_retries_focus_after_quick_settings_tile():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "TILE_FOCUS_RETRY_COUNT" in source
+    assert "TILE_FOCUS_RETRY_DELAY_MS" in source
+    assert "startRecording(true, TILE_FOCUS_RETRY_COUNT)" in source
+    assert "scheduleTileFocusRetry(retriesRemaining - 1)" in source
+    assert "setStatus(\"Finding field\")" in source
+    assert "cancelTileFocusRetry()" in source
+
+
+def test_floating_service_falls_back_to_focused_editable_descendant():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)" in source
+    assert "findFocusedEditableDescendant(root)" in source
+    assert "node.isAccessibilityFocused()" in source
+
+
 def test_floating_service_replaces_live_dictation_span_not_start_snapshot():
     source = (
         ANDROID_IME_ROOT

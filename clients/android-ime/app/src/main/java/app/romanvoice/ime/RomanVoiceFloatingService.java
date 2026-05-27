@@ -37,6 +37,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final int PILL_COLOR_RECORDED = 0xEE2F7D4C;
     private static final int PILL_COLOR_ERROR = 0xEE7A3129;
     private static final boolean SHOW_CANCEL_BUTTON = false;
+    private static final int TILE_FOCUS_RETRY_COUNT = 8;
+    private static final long TILE_FOCUS_RETRY_DELAY_MS = 150;
 
     private static volatile RomanVoiceFloatingService activeService;
 
@@ -49,6 +51,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private Button cancelButton;
     private TextView statusView;
     private Runnable hideIdleOverlayRunnable;
+    private Runnable tileFocusRetryRunnable;
 
     private volatile boolean recording;
     private volatile boolean connecting;
@@ -199,16 +202,22 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (recording) {
             stopRecording(true);
         } else {
-            startRecording();
+            startRecording(false, 0);
         }
     }
 
     private void toggleRecordingFromTile() {
-        toggleRecording();
+        if (recording) {
+            cancelTileFocusRetry();
+            stopRecording(true);
+        } else {
+            startRecording(true, TILE_FOCUS_RETRY_COUNT);
+        }
     }
 
-    private void startRecording() {
+    private void startRecording(boolean retryMissingFocus, int retriesRemaining) {
         if (!hasRecordPermission()) {
+            cancelTileFocusRetry();
             showIdleNotice("Grant mic");
             openSettings();
             return;
@@ -216,21 +225,29 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
         AccessibilityNodeInfo target = findFocusedEditableNode();
         if (target == null) {
+            if (retryMissingFocus && retriesRemaining > 0) {
+                scheduleTileFocusRetry(retriesRemaining - 1);
+                return;
+            }
             Log.i(TAG, "Tile/start ignored: no focused editable field");
+            cancelTileFocusRetry();
             showIdleNotice("Tap a text field first");
             return;
         }
+        cancelTileFocusRetry();
         captureInsertionState(target);
         recycleNode(target);
 
         String streamUrl = RomanVoicePreferences.streamUrl(this);
         String token = RomanVoicePreferences.token(this);
         if (streamUrl == null || streamUrl.trim().isEmpty() || streamUrl.contains("100.x.x.x")) {
+            cancelTileFocusRetry();
             showIdleNotice("Set URL");
             openSettings();
             return;
         }
         if (token == null || token.trim().isEmpty()) {
+            cancelTileFocusRetry();
             showIdleNotice("Set token");
             openSettings();
             return;
@@ -276,6 +293,28 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }, "RomanVoiceFloatConnect").start();
     }
 
+    private void scheduleTileFocusRetry(int retriesRemaining) {
+        if (tileFocusRetryRunnable != null) {
+            mainHandler.removeCallbacks(tileFocusRetryRunnable);
+        }
+        setStatus("Finding field");
+        setPillState(PILL_COLOR_CONNECTING, true);
+        tileFocusRetryRunnable = () -> {
+            tileFocusRetryRunnable = null;
+            if (!recording && !connecting) {
+                startRecording(true, retriesRemaining);
+            }
+        };
+        mainHandler.postDelayed(tileFocusRetryRunnable, TILE_FOCUS_RETRY_DELAY_MS);
+    }
+
+    private void cancelTileFocusRetry() {
+        if (tileFocusRetryRunnable != null) {
+            mainHandler.removeCallbacks(tileFocusRetryRunnable);
+            tileFocusRetryRunnable = null;
+        }
+    }
+
     private void startAudioPump() throws IOException {
         int minBuffer = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
@@ -315,6 +354,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void stopRecording(boolean requestFinal) {
+        cancelTileFocusRetry();
         boolean wasRecording = recording;
         recording = false;
         connecting = false;
@@ -348,6 +388,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void cancelRecording() {
+        cancelTileFocusRetry();
         boolean hadClient = client != null;
         boolean wasRecording = recording;
         recording = false;
@@ -579,15 +620,48 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             return null;
         }
         AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (isUsableFocusedEditable(focused)) {
+            if (focused != root) {
+                recycleNode(root);
+            }
+            return focused;
+        }
+        recycleNode(focused);
+
+        if (isUsableFocusedEditable(root)) {
+            return root;
+        }
+        AccessibilityNodeInfo fallback = findFocusedEditableDescendant(root);
         recycleNode(root);
-        if (focused == null) {
+        return fallback;
+    }
+
+    private AccessibilityNodeInfo findFocusedEditableDescendant(AccessibilityNodeInfo node) {
+        if (node == null) {
             return null;
         }
-        if (!focused.isEditable()) {
-            recycleNode(focused);
-            return null;
+        int childCount = node.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) {
+                continue;
+            }
+            if (isUsableFocusedEditable(child)) {
+                return child;
+            }
+            AccessibilityNodeInfo descendant = findFocusedEditableDescendant(child);
+            recycleNode(child);
+            if (descendant != null) {
+                return descendant;
+            }
         }
-        return focused;
+        return null;
+    }
+
+    private boolean isUsableFocusedEditable(AccessibilityNodeInfo node) {
+        return node != null
+                && node.isEditable()
+                && (node.isFocused() || node.isAccessibilityFocused());
     }
 
     private void cleanupClient() {
