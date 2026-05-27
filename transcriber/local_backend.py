@@ -8,11 +8,11 @@ This backend uses faster-whisper (CTranslate2) which provides:
 - No external FFmpeg dependency (uses PyAV)
 """
 import logging
-import re
 import threading
 from typing import Optional, List, Tuple
 from faster_whisper import WhisperModel
 from .base import TranscriptionBackend
+from .transcript_cleanup import clean_transcript_text
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -379,87 +379,12 @@ class LocalWhisperBackend(TranscriptionBackend):
     @staticmethod
     def _clean_transcript_text(transcript: str) -> str:
         """Apply light dictation cleanup without changing wording."""
-        text = re.sub(r"\s+", " ", transcript or "").strip()
-        if not text or not config.FASTER_WHISPER_LIGHT_CLEANUP:
-            return text
-
-        text = LocalWhisperBackend._normalize_time_meridiems(text)
-        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-        text = re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
-        text = re.sub(r"\b(\d{1,2}):\s+(\d{2})\b", r"\1:\2", text)
-        text = re.sub(r"\bi\b", "I", text)
-        text = LocalWhisperBackend._capitalize_sentence_starts(text)
-
-        if text and text[-1] not in ".!?…":
-            text += "."
-
-        text = LocalWhisperBackend._trim_repeated_tail_sentences(text)
-
-        return text
-
-    @staticmethod
-    def _normalize_time_meridiems(text: str) -> str:
-        """Normalize Whisper's common AM/PM variants before sentence cleanup."""
-
-        def replace(match: re.Match) -> str:
-            hour = match.group("hour")
-            minutes = match.group("minutes") or ""
-            suffix = match.group("suffix").upper()
-            return f"{hour}{minutes} {suffix}M"
-
-        return re.sub(
-            r"\b(?P<hour>\d{1,2})(?P<minutes>:\d{2})?\s+"
-            r"(?P<suffix>[ap])\s*\.?\s*m\s*\.?\b",
-            replace,
-            text,
-            flags=re.IGNORECASE,
+        return clean_transcript_text(
+            transcript,
+            enabled=config.FASTER_WHISPER_LIGHT_CLEANUP,
+            glossary_path=getattr(config, "TRANSCRIPT_GLOSSARY_FILE", None),
+            glossary_enabled=getattr(config, "TRANSCRIPT_GLOSSARY_ENABLED", True),
         )
-
-    @staticmethod
-    def _capitalize_sentence_starts(text: str) -> str:
-        chars = list(text)
-        capitalize_next = True
-        for index, char in enumerate(chars):
-            if char.isalpha():
-                if capitalize_next:
-                    chars[index] = char.upper()
-                capitalize_next = False
-            elif char in ".!?":
-                capitalize_next = True
-            elif not char.isspace() and char not in "\"'“”‘’([{":
-                capitalize_next = False
-        return "".join(chars)
-
-    @staticmethod
-    def _trim_repeated_tail_sentences(text: str) -> str:
-        sentences = re.findall(r"\s*[^.!?…]+[.!?…]+", text or "")
-        if len(sentences) < 4:
-            return text
-
-        last = LocalWhisperBackend._normalize_repeated_sentence(sentences[-1])
-        if not last:
-            return text
-
-        repeated_count = 1
-        for sentence in reversed(sentences[:-1]):
-            if LocalWhisperBackend._normalize_repeated_sentence(sentence) != last:
-                break
-            repeated_count += 1
-
-        if repeated_count < 4:
-            return text
-
-        keep_count = len(sentences) - repeated_count + 1
-        trimmed = "".join(sentences[:keep_count]).strip()
-        logger.info(
-            "Trimmed repeated transcript tail sentence (%s repeated copies removed)",
-            repeated_count - 1,
-        )
-        return trimmed or text
-
-    @staticmethod
-    def _normalize_repeated_sentence(sentence: str) -> str:
-        return re.sub(r"\W+", " ", sentence or "").strip().lower()
 
     def reload_model(self, model_name: str = None):
         """Reload the Whisper model with a different model name.

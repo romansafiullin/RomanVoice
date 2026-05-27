@@ -234,6 +234,10 @@ class AppConfig:
         "speaker's wording."
     )
     FASTER_WHISPER_LIGHT_CLEANUP: bool = True
+    TRANSCRIPT_GLOSSARY_ENABLED: bool = True
+    TRANSCRIPT_GLOSSARY_FILE: str = field(
+        default_factory=lambda: os.path.join(_appdata_dir(), "transcript_glossary.json")
+    )
 
     # Text injection settings
     DEFAULT_AUTO_PASTE: bool = True
