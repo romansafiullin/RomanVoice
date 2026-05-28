@@ -161,6 +161,13 @@ if ($EnableFloatingMic) {
     Enable-FloatingMicService
 }
 & $Adb shell am start -n app.romanvoice.ime/.SettingsActivity | Out-Null
+if ($EnableFloatingMic) {
+    # Android can drop the enabled accessibility service during an APK update
+    # after our first write appears to succeed. Re-apply after launch so the
+    # phone is left in the usable floating-mic state.
+    Start-Sleep -Milliseconds 750
+    Enable-FloatingMicService
+}
 
 Write-Output "Installed RomanVoice IME."
 Write-Output "Stream URL: $StreamUrl"
