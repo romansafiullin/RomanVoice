@@ -579,7 +579,7 @@ class TestApplicationController(unittest.TestCase):
         controller = self._create_controller()
         live_text = "quick note from the live stream"
         controller.recorder.is_recording = True
-        controller.recorder.duration = 5.31
+        controller.recorder.duration = 3.31
         controller.streaming_transcriber.stop_streaming = lambda: live_text
         controller._live_typed_text = live_text
 
@@ -597,6 +597,21 @@ class TestApplicationController(unittest.TestCase):
             for state in controller.ui_controller.overlay_states
         ]
         self.assertNotIn("processing", overlay_values)
+
+    def test_stop_recording_keeps_final_pass_for_five_second_dictation(self):
+        controller = self._create_controller()
+        live_text = "did this stuff working on"
+        controller.recorder.is_recording = True
+        controller.recorder.duration = 5.31
+        controller.streaming_transcriber.stop_streaming = lambda: live_text
+        controller._live_typed_text = live_text
+
+        controller.stop_recording()
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
+        )
 
     def test_stop_recording_keeps_final_pass_when_short_streaming_text_is_too_short(self):
         controller = self._create_controller()

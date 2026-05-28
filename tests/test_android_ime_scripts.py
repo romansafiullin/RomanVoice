@@ -140,6 +140,8 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert 'cancelButton.setText("X")' in source
     assert "private static final boolean SHOW_CANCEL_BUTTON = false" in source
     assert "cancelButton.setOnClickListener(view -> cancelRecording())" in source
+    assert 'micButton.setText("Start")' in source
+    assert 'micButton.setText(isRecording ? "Stop" : "Start")' in source
     assert "overlayView.setVisibility(View.GONE)" in source
     assert "statusView.setVisibility(View.GONE)" in source
     assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording)" in source

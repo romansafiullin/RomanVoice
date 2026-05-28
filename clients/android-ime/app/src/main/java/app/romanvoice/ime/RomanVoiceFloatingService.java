@@ -145,7 +145,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         setPillColor(PILL_COLOR_IDLE);
 
         micButton = new Button(this);
-        micButton.setText("RV");
+        micButton.setText("Start");
         micButton.setTextColor(Color.WHITE);
         micButton.setBackgroundColor(Color.TRANSPARENT);
         micButton.setMinWidth(0);
@@ -710,7 +710,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void setRecordingControls(boolean isRecording) {
         setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording);
         if (micButton != null) {
-            micButton.setText(isRecording ? "Stop" : "RV");
+            micButton.setText(isRecording ? "Stop" : "Start");
             micButton.setEnabled(true);
         }
         if (cancelButton != null) {

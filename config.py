@@ -287,7 +287,7 @@ class AppConfig:
     STREAMING_CHUNK_DURATION_SEC: float = 2.0  # Process every N seconds
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
-    SHORT_FORM_FINAL_SKIP_MAX_SECONDS: float = 6.0
+    SHORT_FORM_FINAL_SKIP_MAX_SECONDS: float = 4.0
     SHORT_FORM_FINAL_SKIP_MIN_CHARS: int = 10
     LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS: float = 45.0
     LONG_FORM_STREAMING_FALLBACK_MIN_CHARS: int = 300
