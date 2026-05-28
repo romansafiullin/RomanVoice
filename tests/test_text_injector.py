@@ -22,6 +22,25 @@ def test_empty_text_is_noop():
     assert result.method == "none"
 
 
+def test_focus_token_tracks_foreground_window(monkeypatch):
+    injector = TextInjector()
+    current = {"hwnd": 123}
+
+    monkeypatch.setattr(
+        injector,
+        "_get_foreground_window_handle",
+        lambda: current["hwnd"],
+    )
+
+    token = injector.capture_focus_token()
+    assert token == 123
+    assert injector.is_focus_token_active(token) is True
+
+    current["hwnd"] = 456
+    assert injector.is_focus_token_active(token) is False
+    assert injector.is_focus_token_active(None) is True
+
+
 def test_common_prefix_length_counts_shared_start():
     assert TextInjector._common_prefix_length("hello wurld", "hello world") == 7
     assert TextInjector._common_prefix_length("abc", "xyz") == 0

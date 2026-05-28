@@ -81,6 +81,17 @@ class InjectionResult:
 class TextInjector:
     """Inject text into the currently focused Windows control."""
 
+    def capture_focus_token(self) -> int | None:
+        """Capture the foreground window that should receive dictation text."""
+        return self._get_foreground_window_handle()
+
+    def is_focus_token_active(self, focus_token: int | None) -> bool:
+        """Return True when the captured foreground window still has focus."""
+        if focus_token is None:
+            return True
+        current = self._get_foreground_window_handle()
+        return current == focus_token
+
     def inject(
         self,
         text: str,
@@ -224,6 +235,20 @@ class TextInjector:
             error = ctypes.get_last_error()
             return InjectionResult(False, "clipboard_paste", f"SendInput sent {sent}/4 events; error={error}")
         return InjectionResult(True, "clipboard_paste")
+
+    @staticmethod
+    def _get_foreground_window_handle() -> int | None:
+        try:
+            get_foreground_window = ctypes.WinDLL(
+                "user32",
+                use_last_error=True,
+            ).GetForegroundWindow
+            get_foreground_window.restype = ctypes.c_void_p
+            hwnd = get_foreground_window()
+        except Exception as exc:
+            logger.debug("Could not read foreground window: %s", exc)
+            return None
+        return int(hwnd) if hwnd else None
 
     @staticmethod
     def _keyboard_input(code_unit: int, flags: int, *, use_vk: bool = False) -> INPUT:

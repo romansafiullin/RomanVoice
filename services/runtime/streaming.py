@@ -212,6 +212,8 @@ class StreamingRuntime:
             enabled = settings.get(SettingsKey.LIVE_TYPE_ENABLED, config.LIVE_TYPE_ENABLED)
             if not enabled:
                 return
+            if not self._text_injection_target_is_active():
+                return
 
             result = text_injector.update_live_text(
                 self.controller._live_typed_text,
@@ -232,6 +234,23 @@ class StreamingRuntime:
         except Exception as exc:
             self.controller._live_typing_failed = True
             logger.error("Live typing failed: %s", exc)
+
+    def _text_injection_target_is_active(self) -> bool:
+        checker = getattr(text_injector, "is_focus_token_active", None)
+        if not callable(checker):
+            return True
+
+        focus_token = getattr(self.controller, "_text_injection_focus_token", None)
+        if checker(focus_token):
+            return True
+
+        if not getattr(self.controller, "_text_injection_target_lost_logged", False):
+            logger.warning(
+                "Skipping live typing update because focused window changed "
+                "since recording started"
+            )
+            self.controller._text_injection_target_lost_logged = True
+        return False
 
     def _cleanup_streaming_resources(self) -> None:
         if self.controller.streaming_transcriber:

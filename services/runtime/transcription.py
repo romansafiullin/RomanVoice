@@ -52,6 +52,7 @@ class TranscriptionRuntime:
 
     def start_recording(self) -> None:
         """Start audio recording."""
+        focus_token = self._capture_text_injection_focus_token()
         if self.controller.recorder.start_recording():
             logger.info("Recording started")
             self.controller._last_streaming_text = ""
@@ -59,6 +60,8 @@ class TranscriptionRuntime:
             self.controller._streaming_guard_evaluated = False
             self.controller._live_typed_text = ""
             self.controller._live_typing_failed = False
+            self.controller._text_injection_focus_token = focus_token
+            self.controller._text_injection_target_lost_logged = False
             self.controller.ui_controller.clear_transcription_stats()
             self.controller.ui_controller.main_window.clear_partial_transcription()
             self.controller.start_silence_auto_stop_monitor()
@@ -67,6 +70,8 @@ class TranscriptionRuntime:
             self.controller.overlay_state_update.emit(OverlayState.RECORDING)
             self.controller.status_update.emit("Recording...")
         else:
+            self.controller._text_injection_focus_token = None
+            self.controller._text_injection_target_lost_logged = False
             self.controller.overlay_state_update.emit(OverlayState.NONE)
             self.controller.status_update.emit("Failed to start recording")
 
@@ -144,6 +149,8 @@ class TranscriptionRuntime:
 
         if self._complete_short_form_from_streaming():
             return
+        if self._complete_gpu_busy_from_streaming():
+            return
 
         self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
         self.controller.status_update.emit("Processing...")
@@ -194,6 +201,8 @@ class TranscriptionRuntime:
         self.controller.recording_state_changed.emit(False)
         self.controller.recorder.stop_recording()
         self.controller.recorder.clear_recording_data()
+        self.controller._text_injection_focus_token = None
+        self.controller._text_injection_target_lost_logged = False
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Recording canceled")
         logger.info("Recording canceled")
@@ -208,6 +217,8 @@ class TranscriptionRuntime:
         self.controller._pending_audio_duration = None
         self.controller._pending_file_size = None
         self.controller._transcription_start_time = None
+        self.controller._text_injection_focus_token = None
+        self.controller._text_injection_target_lost_logged = False
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Transcription canceled")
         logger.info("Transcription canceled")
@@ -373,6 +384,8 @@ class TranscriptionRuntime:
             self.controller._streaming_guard_evaluated = False
             self.controller._live_typed_text = ""
             self.controller._live_typing_failed = False
+            self.controller._text_injection_focus_token = None
+            self.controller._text_injection_target_lost_logged = False
             return
 
         self.controller.ui_controller.set_transcript(transcript)
@@ -440,62 +453,76 @@ class TranscriptionRuntime:
         )
         inserted_transcript = False
         text_injection_failed = False
+        text_injection_target_changed = False
 
         if live_type_enabled:
-            previous_live_text = self.controller._live_typed_text
-            result = text_injector.update_live_text(
-                previous_live_text,
-                transcript,
-                key_delay_ms=key_delay_ms,
-            )
-            if result.success:
-                self.controller._live_typed_text = transcript
-                inserted_transcript = True
-                logger.info("Live typed final transcript (%s chars)", len(transcript))
+            if not self._text_injection_target_is_active("final live typing"):
+                text_injection_target_changed = True
             else:
-                logger.error("Failed to reconcile live typed transcript: %s", result.error)
-                if not previous_live_text:
-                    fallback = text_injector.inject(
-                        transcript,
-                        mode=injection_mode,
-                        key_delay_ms=key_delay_ms,
-                        long_text_threshold=long_text_threshold,
-                    )
-                    if fallback.success:
-                        inserted_transcript = True
-                        logger.info(
-                            "Transcription inserted via %s after live typing failed",
-                            fallback.method,
-                        )
+                previous_live_text = self.controller._live_typed_text
+                result = text_injector.update_live_text(
+                    previous_live_text,
+                    transcript,
+                    key_delay_ms=key_delay_ms,
+                )
+                if result.success:
+                    self.controller._live_typed_text = transcript
+                    inserted_transcript = True
+                    logger.info("Live typed final transcript (%s chars)", len(transcript))
+                else:
+                    logger.error("Failed to reconcile live typed transcript: %s", result.error)
+                    if not previous_live_text:
+                        if not self._text_injection_target_is_active("fallback text injection"):
+                            text_injection_target_changed = True
+                        else:
+                            fallback = text_injector.inject(
+                                transcript,
+                                mode=injection_mode,
+                                key_delay_ms=key_delay_ms,
+                                long_text_threshold=long_text_threshold,
+                            )
+                            if fallback.success:
+                                inserted_transcript = True
+                                logger.info(
+                                    "Transcription inserted via %s after live typing failed",
+                                    fallback.method,
+                                )
+                            else:
+                                text_injection_failed = True
+                                logger.error(
+                                    "Failed to inject transcription after live typing failed: %s",
+                                    fallback.error,
+                                )
                     else:
                         text_injection_failed = True
-                        logger.error(
-                            "Failed to inject transcription after live typing failed: %s",
-                            fallback.error,
+                        logger.warning(
+                            "Skipping full-text fallback because %s chars were already live typed",
+                            len(previous_live_text),
                         )
-                else:
-                    text_injection_failed = True
-                    logger.warning(
-                        "Skipping full-text fallback because %s chars were already live typed",
-                        len(previous_live_text),
-                    )
 
         if auto_paste and not live_type_enabled:
-            result = text_injector.inject(
-                transcript,
-                mode=injection_mode,
-                key_delay_ms=key_delay_ms,
-                long_text_threshold=long_text_threshold,
-            )
-            if result.success:
-                inserted_transcript = True
-                logger.info("Transcription injected via %s", result.method)
+            if not self._text_injection_target_is_active("final text injection"):
+                text_injection_target_changed = True
             else:
-                text_injection_failed = True
-                logger.error("Failed to inject transcription: %s", result.error)
+                result = text_injector.inject(
+                    transcript,
+                    mode=injection_mode,
+                    key_delay_ms=key_delay_ms,
+                    long_text_threshold=long_text_threshold,
+                )
+                if result.success:
+                    inserted_transcript = True
+                    logger.info("Transcription injected via %s", result.method)
+                else:
+                    text_injection_failed = True
+                    logger.error("Failed to inject transcription: %s", result.error)
 
         if inserted_transcript:
             self.controller.ui_controller.set_status("Ready (Pasted)")
+        elif text_injection_target_changed:
+            self.controller.ui_controller.set_status(
+                "Transcription complete (target changed; copied)"
+            )
         elif text_injection_failed:
             self.controller.ui_controller.set_status(
                 "Transcription complete (text injection failed)"
@@ -503,10 +530,15 @@ class TranscriptionRuntime:
         else:
             self.controller.ui_controller.set_status("Ready")
 
-        if copy_clipboard:
+        if copy_clipboard or text_injection_target_changed:
             try:
                 pyperclip.copy(transcript)
-                logger.info("Transcription copied to clipboard")
+                if text_injection_target_changed and not copy_clipboard:
+                    logger.info(
+                        "Transcription copied to clipboard because focused target changed"
+                    )
+                else:
+                    logger.info("Transcription copied to clipboard")
             except Exception as exc:
                 logger.error(f"Failed to copy to clipboard: {exc}")
 
@@ -518,6 +550,8 @@ class TranscriptionRuntime:
         self.controller._streaming_guard_evaluated = False
         self.controller._live_typed_text = ""
         self.controller._live_typing_failed = False
+        self.controller._text_injection_focus_token = None
+        self.controller._text_injection_target_lost_logged = False
 
     def _choose_transcript_with_streaming_guard(
         self,
@@ -573,6 +607,8 @@ class TranscriptionRuntime:
         self.controller._best_streaming_text = ""
         self.controller._streaming_guard_evaluated = False
         self.controller._live_typing_failed = False
+        self.controller._text_injection_focus_token = None
+        self.controller._text_injection_target_lost_logged = False
 
     def on_model_changed(self, model_name: str) -> None:
         """Handle model selection change."""
@@ -659,6 +695,36 @@ class TranscriptionRuntime:
             return True
         return False
 
+    def _complete_gpu_busy_from_streaming(self) -> bool:
+        duration = self.controller._pending_audio_duration or 0.0
+        streaming_text = self._best_streaming_text()
+        if (
+            duration <= 0
+            or duration > config.GPU_BUSY_STREAMING_FINAL_SKIP_MAX_SECONDS
+            or len(streaming_text) < config.GPU_BUSY_STREAMING_FINAL_SKIP_MIN_CHARS
+            or not self._should_guard_cuda_backend(self.controller.current_backend)
+        ):
+            return False
+
+        status = gpu_guard.query_status()
+        busy_reason = status.busy_reason()
+        if not busy_reason:
+            return False
+
+        self.controller._transcription_job_id += 1
+        self.controller._streaming_guard_evaluated = True
+        self.controller._transcription_start_time = time.time()
+        self.controller.overlay_state_update.emit(OverlayState.NONE)
+        logger.info(
+            "Skipping final transcription while CUDA is busy; using streaming "
+            "transcript (duration=%.2fs, streaming_chars=%s, reason=%s)",
+            duration,
+            len(streaming_text),
+            busy_reason,
+        )
+        self.controller.transcription_completed.emit(streaming_text)
+        return True
+
     def _best_streaming_text(self) -> str:
         streaming_text = (self.controller._last_streaming_text or "").strip()
         best_streaming_text = (
@@ -667,6 +733,29 @@ class TranscriptionRuntime:
         if len(best_streaming_text) > len(streaming_text):
             return best_streaming_text
         return streaming_text
+
+    def _capture_text_injection_focus_token(self) -> int | None:
+        capture = getattr(text_injector, "capture_focus_token", None)
+        if not callable(capture):
+            return None
+        return capture()
+
+    def _text_injection_target_is_active(self, action: str) -> bool:
+        checker = getattr(text_injector, "is_focus_token_active", None)
+        if not callable(checker):
+            return True
+
+        focus_token = getattr(self.controller, "_text_injection_focus_token", None)
+        if checker(focus_token):
+            return True
+
+        if not getattr(self.controller, "_text_injection_target_lost_logged", False):
+            logger.warning(
+                "Skipping %s because focused window changed since recording started",
+                action,
+            )
+            self.controller._text_injection_target_lost_logged = True
+        return False
 
     def _get_active_transcription_backend(self):
         return (

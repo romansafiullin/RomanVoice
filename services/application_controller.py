@@ -72,6 +72,8 @@ class ApplicationController(QObject):
         self._streaming_guard_evaluated = False
         self._live_typed_text = ""
         self._live_typing_failed = False
+        self._text_injection_focus_token: Optional[int] = None
+        self._text_injection_target_lost_logged = False
         self._last_gpu_unload_time = 0.0
         self._last_gpu_warmup_defer_log_time = 0.0
         self._silence_auto_stop_started_at = 0.0

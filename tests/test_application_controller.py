@@ -282,10 +282,24 @@ class FakeTextInjector:
     def __init__(self):
         self.live_updates = []
         self.injections = []
+        self.focus_token = "focus-1"
+        self.focus_active = True
+        self.focus_captures = []
+        self.focus_checks = []
         self.live_result = types.SimpleNamespace(
             success=True, method="live_unicode", error=None
         )
         self.inject_result = None
+
+    def capture_focus_token(self):
+        self.focus_captures.append(True)
+        return self.focus_token
+
+    def is_focus_token_active(self, focus_token):
+        self.focus_checks.append(focus_token)
+        if focus_token is None:
+            return True
+        return self.focus_active
 
     def update_live_text(self, previous_text, next_text, *, key_delay_ms=0):
         self.live_updates.append((previous_text, next_text, key_delay_ms))
@@ -613,6 +627,33 @@ class TestApplicationController(unittest.TestCase):
             controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
         )
 
+    def test_stop_recording_uses_streaming_text_when_gpu_busy_for_normal_dictation(self):
+        controller = self._create_controller()
+        live_text = "text message about the phone problem"
+        controller.recorder.is_recording = True
+        controller.recorder.duration = 11.46
+        controller.streaming_transcriber.stop_streaming = lambda: live_text
+        controller._live_typed_text = live_text
+        controller.current_backend.prefers_cuda = True
+        status = types.SimpleNamespace(busy_reason=lambda: "free memory 1100 MB")
+
+        transcription_module = importlib.import_module("services.runtime.transcription")
+        with patch.object(
+            transcription_module.gpu_guard,
+            "query_status",
+            return_value=status,
+        ):
+            controller.stop_recording()
+
+        self.assertEqual(controller.executor.submissions, [])
+        self.assertEqual(len(self.history_manager.entries), 1)
+        self.assertEqual(self.history_manager.entries[0]["text"], live_text)
+        overlay_values = [
+            getattr(state, "value", state)
+            for state in controller.ui_controller.overlay_states
+        ]
+        self.assertNotIn("processing", overlay_values)
+
     def test_stop_recording_keeps_final_pass_when_short_streaming_text_is_too_short(self):
         controller = self._create_controller()
         controller.recorder.is_recording = True
@@ -792,6 +833,22 @@ class TestApplicationController(unittest.TestCase):
             controller.ui_controller.statuses,
         )
 
+    def test_transcription_complete_skips_injection_when_focus_moved(self):
+        controller = self._create_controller()
+        controller._text_injection_focus_token = self.text_injector.focus_token
+        self.text_injector.focus_active = False
+        self.settings.all_settings["copy_clipboard"] = False
+
+        controller._on_transcription_complete("do not type into a different app")
+
+        self.assertEqual(self.text_injector.live_updates, [])
+        self.assertEqual(self.text_injector.injections, [])
+        self.assertEqual(self.pyperclip.copied[-1], "do not type into a different app")
+        self.assertIn(
+            "Transcription complete (target changed; copied)",
+            controller.ui_controller.statuses,
+        )
+
     def test_streaming_partial_live_types_into_focused_control(self):
         controller = self._create_controller()
 
@@ -803,6 +860,17 @@ class TestApplicationController(unittest.TestCase):
             self.text_injector.live_updates[-1],
             ("", "draft text", 0),
         )
+
+    def test_streaming_partial_does_not_type_when_focus_moved(self):
+        controller = self._create_controller()
+        controller._text_injection_focus_token = self.text_injector.focus_token
+        self.text_injector.focus_active = False
+
+        controller.streaming_runtime.on_partial_transcription("draft text", True)
+
+        self.assertEqual(controller._last_streaming_text, "draft text")
+        self.assertEqual(controller._live_typed_text, "")
+        self.assertEqual(self.text_injector.live_updates, [])
 
     def test_streaming_runtime_preserves_best_text_when_late_update_is_shorter(self):
         controller = self._create_controller()
