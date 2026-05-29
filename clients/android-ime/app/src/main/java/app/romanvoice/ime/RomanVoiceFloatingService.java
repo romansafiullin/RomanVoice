@@ -39,6 +39,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final boolean SHOW_CANCEL_BUTTON = false;
     private static final int TILE_FOCUS_RETRY_COUNT = 8;
     private static final long TILE_FOCUS_RETRY_DELAY_MS = 150;
+    private static final long IDLE_NOTICE_VISIBLE_MS = 1800;
+    private static final long RESTART_WINDOW_VISIBLE_MS = 8000;
 
     private static volatile RomanVoiceFloatingService activeService;
 
@@ -216,6 +218,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void startRecording(boolean retryMissingFocus, int retriesRemaining) {
+        cancelIdleOverlayHide();
         if (!hasRecordPermission()) {
             cancelTileFocusRetry();
             showIdleNotice("Grant mic");
@@ -363,6 +366,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
         if (requestFinal && client != null) {
             setStatus("Finishing");
+            cancelIdleOverlayHide();
             setPillState(PILL_COLOR_RECORDED, true);
             micButton.setEnabled(false);
             if (cancelButton != null) {
@@ -696,15 +700,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             return;
         }
         overlayView.setVisibility(View.VISIBLE);
-        if (hideIdleOverlayRunnable != null) {
-            mainHandler.removeCallbacks(hideIdleOverlayRunnable);
-        }
-        hideIdleOverlayRunnable = () -> {
-            if (!recording && !connecting && overlayView != null) {
-                overlayView.setVisibility(View.GONE);
-            }
-        };
-        mainHandler.postDelayed(hideIdleOverlayRunnable, 1800);
+        scheduleIdleOverlayHide(IDLE_NOTICE_VISIBLE_MS);
     }
 
     private void setRecordingControls(boolean isRecording) {
@@ -717,6 +713,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (cancelButton != null) {
             cancelButton.setVisibility(SHOW_CANCEL_BUTTON && isRecording ? View.VISIBLE : View.GONE);
         }
+        if (!isRecording) {
+            scheduleIdleOverlayHide(RESTART_WINDOW_VISIBLE_MS);
+        }
     }
 
     private void cancelIdleOverlayHide() {
@@ -724,6 +723,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             mainHandler.removeCallbacks(hideIdleOverlayRunnable);
             hideIdleOverlayRunnable = null;
         }
+    }
+
+    private void scheduleIdleOverlayHide(long delayMs) {
+        cancelIdleOverlayHide();
+        hideIdleOverlayRunnable = () -> {
+            if (!recording && !connecting && overlayView != null) {
+                overlayView.setVisibility(View.GONE);
+            }
+            hideIdleOverlayRunnable = null;
+        };
+        mainHandler.postDelayed(hideIdleOverlayRunnable, delayMs);
     }
 
     private void setPillState(int color, boolean visible) {
