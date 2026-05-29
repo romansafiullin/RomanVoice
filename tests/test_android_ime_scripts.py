@@ -144,7 +144,8 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert 'micButton.setText(isRecording ? "Stop" : "Start")' in source
     assert "overlayView.setVisibility(View.GONE)" in source
     assert "statusView.setVisibility(View.GONE)" in source
-    assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording)" in source
+    assert "cancelIdleOverlayHide()" in source
+    assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true)" in source
     assert "setPillState(PILL_COLOR_RECORDED, true)" in source
     assert "showIdleNotice(\"Tap a text field first\")" in source
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source

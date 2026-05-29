@@ -708,13 +708,21 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void setRecordingControls(boolean isRecording) {
-        setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, isRecording);
+        cancelIdleOverlayHide();
+        setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true);
         if (micButton != null) {
             micButton.setText(isRecording ? "Stop" : "Start");
             micButton.setEnabled(true);
         }
         if (cancelButton != null) {
             cancelButton.setVisibility(SHOW_CANCEL_BUTTON && isRecording ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void cancelIdleOverlayHide() {
+        if (hideIdleOverlayRunnable != null) {
+            mainHandler.removeCallbacks(hideIdleOverlayRunnable);
+            hideIdleOverlayRunnable = null;
         }
     }
 
