@@ -30,6 +30,20 @@ def test_light_cleanup_normalizes_time_meridiems_before_capitalization():
     assert LocalWhisperBackend._clean_transcript_text("the call is at 10:30 pm") == "The call is at 10:30 PM."
 
 
+def test_light_cleanup_normalizes_dot_separated_time_minutes_with_context():
+    assert LocalWhisperBackend._clean_transcript_text(
+        "she'll be here around 6. 15, so we can eat"
+    ) == "She'll be here around 6:15, so we can eat."
+    assert LocalWhisperBackend._clean_transcript_text("meet me at 6.15") == "Meet me at 6:15."
+    assert LocalWhisperBackend._clean_transcript_text("leave by 10. 30 p.m.") == "Leave by 10:30 PM."
+
+
+def test_light_cleanup_does_not_normalize_dot_number_without_time_context():
+    text = LocalWhisperBackend._clean_transcript_text("the measurement was 6. 15 inches")
+
+    assert text == "The measurement was 6. 15 inches."
+
+
 def test_light_cleanup_normalizes_inline_time_and_ordinal_fragments():
     text = LocalWhisperBackend._clean_transcript_text(
         "i got us dental cleanings this Monday, the 1st. Yours at 10 a.m. , mine's at 1. "

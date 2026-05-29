@@ -38,6 +38,7 @@ class DeterministicTranscriptCleaner:
         self.glossary_path = glossary_path
         self.glossary_enabled = glossary_enabled
         self.rules = (
+            CleanupRule("normalize_dot_time_minutes", self._normalize_dot_time_minutes),
             CleanupRule("normalize_time_meridiems", self._normalize_time_meridiems),
             CleanupRule("normalize_punctuation_spacing", self._normalize_punctuation_spacing),
             CleanupRule("normalize_inline_fragment_breaks", self._normalize_inline_fragment_breaks),
@@ -63,6 +64,23 @@ class DeterministicTranscriptCleaner:
     @staticmethod
     def _normalize_whitespace(text: str) -> str:
         return re.sub(r"\s+", " ", text or "").strip()
+
+    @staticmethod
+    def _normalize_dot_time_minutes(text: str) -> str:
+        time_cues = (
+            r"after|around|at|before|between|by|from|near|till|until|about"
+        )
+
+        def replace(match: re.Match) -> str:
+            return f"{match.group('cue')}{match.group('hour')}:{match.group('minutes')}"
+
+        return re.sub(
+            rf"\b(?P<cue>(?:{time_cues})\s+)"
+            r"(?P<hour>0?[1-9]|1[0-2])\s*\.\s*(?P<minutes>[0-5]\d)\b",
+            replace,
+            text,
+            flags=re.IGNORECASE,
+        )
 
     @staticmethod
     def _normalize_time_meridiems(text: str) -> str:
