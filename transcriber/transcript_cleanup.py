@@ -40,6 +40,7 @@ class DeterministicTranscriptCleaner:
         self.rules = (
             CleanupRule("normalize_time_meridiems", self._normalize_time_meridiems),
             CleanupRule("normalize_punctuation_spacing", self._normalize_punctuation_spacing),
+            CleanupRule("normalize_inline_fragment_breaks", self._normalize_inline_fragment_breaks),
             CleanupRule("normalize_thousands_separators", self._normalize_thousands_separators),
             CleanupRule("normalize_time_colons", self._normalize_time_colons),
             CleanupRule("normalize_standalone_i", self._normalize_standalone_i),
@@ -83,6 +84,35 @@ class DeterministicTranscriptCleaner:
     def _normalize_punctuation_spacing(text: str) -> str:
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         return re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
+
+    @staticmethod
+    def _normalize_inline_fragment_breaks(text: str) -> str:
+        continuation = (
+            r"mine(?:'s)?|yours?|ours?|his|hers?|theirs?|my|our|your|her|their"
+        )
+
+        text = re.sub(r"\b(?P<meridiem>[AP]M)\.\s*,\s*", r"\g<meridiem>, ", text)
+
+        def replace_meridiem_fragment(match: re.Match) -> str:
+            return f"{match.group('meridiem')}, {match.group('next').lower()}"
+
+        text = re.sub(
+            rf"\b(?P<meridiem>[AP]M)\.\s+(?P<next>{continuation})\b",
+            replace_meridiem_fragment,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        def replace_ordinal_fragment(match: re.Match) -> str:
+            return f"{match.group('ordinal')}, {match.group('next').lower()}"
+
+        return re.sub(
+            rf"\b(?P<ordinal>the\s+\d{{1,2}}(?:st|nd|rd|th))\.\s+"
+            rf"(?P<next>{continuation})\b",
+            replace_ordinal_fragment,
+            text,
+            flags=re.IGNORECASE,
+        )
 
     @staticmethod
     def _normalize_thousands_separators(text: str) -> str:
