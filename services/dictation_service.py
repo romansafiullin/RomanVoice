@@ -39,6 +39,7 @@ _CONTENT_TYPE_SUFFIXES = (
     ("audio/wav", ".wav"),
     ("audio/x-wav", ".wav"),
 )
+_PHONE_HEARTBEAT_STALE_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ class RomanVoiceDictationService:
             * 1024
             * 1024
         )
+        self._phone_lock = threading.RLock()
+        self._phone_status: dict[str, Any] | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -147,6 +150,13 @@ class RomanVoiceDictationService:
                         return
                     service._send_json(self, service._health_response(detailed=True))
                     return
+                if parsed.path == "/v1/phone/status":
+                    auth_error = service._require_auth(self)
+                    if auth_error is not None:
+                        service._send_json(self, auth_error)
+                        return
+                    service._send_json(self, service._phone_status_response())
+                    return
                 if parsed.path == "/v1/transcribe/stream":
                     auth_error = service._require_auth(self)
                     if auth_error is not None:
@@ -161,6 +171,14 @@ class RomanVoiceDictationService:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urllib.parse.urlparse(self.path)
+                if parsed.path == "/v1/phone/heartbeat":
+                    auth_error = service._require_auth(self)
+                    if auth_error is not None:
+                        service._send_json(self, auth_error)
+                        return
+                    service._send_json(self, service._handle_phone_heartbeat(self))
+                    return
+
                 if parsed.path != "/v1/transcribe":
                     service._send_json(
                         self,
@@ -244,6 +262,55 @@ class RomanVoiceDictationService:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 logger.debug("Failed to remove service temp audio: %s", temp_path)
+
+    def _handle_phone_heartbeat(self, handler: BaseHTTPRequestHandler) -> ServiceResponse:
+        payload = self._read_json_payload(handler, max_bytes=4096)
+        if payload is None:
+            return ServiceResponse(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "invalid JSON heartbeat payload"},
+            )
+
+        now = time.time()
+        status = {
+            "seen": True,
+            "last_seen_at_epoch": now,
+            "last_seen_at_utc": self._epoch_to_utc(now),
+            "surface": str(payload.get("surface") or "")[:64],
+            "event": str(payload.get("event") or "")[:64],
+            "available": bool(payload.get("available", True)),
+            "recording": bool(payload.get("recording", False)),
+            "connecting": bool(payload.get("connecting", False)),
+        }
+        with self._phone_lock:
+            self._phone_status = status
+        logger.info(
+            "RomanVoice phone heartbeat surface=%s event=%s available=%s recording=%s connecting=%s",
+            status["surface"],
+            status["event"],
+            status["available"],
+            status["recording"],
+            status["connecting"],
+        )
+        return self._phone_status_response(now=now)
+
+    def _read_json_payload(
+        self,
+        handler: BaseHTTPRequestHandler,
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any] | None:
+        try:
+            content_length = int(handler.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None
+        if content_length <= 0 or content_length > max_bytes:
+            return None
+        try:
+            payload = json.loads(handler.rfile.read(content_length).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def _write_temp_audio(self, audio_bytes: bytes, content_type: str | None) -> Path:
         suffix = audio_suffix_for_content_type(content_type)
@@ -668,9 +735,56 @@ class RomanVoiceDictationService:
                     "backend": getattr(backend, "name", "") if backend else "",
                     "device_info": getattr(backend, "device_info", "") if backend else "",
                     "token_file": config.SERVICE_TOKEN_FILE,
+                    "phone": self._phone_status_payload(),
                 }
             )
         return ServiceResponse(HTTPStatus.OK, payload)
+
+    def _phone_status_response(self, *, now: float | None = None) -> ServiceResponse:
+        payload = {
+            "ok": True,
+            "service": "RomanVoice",
+            "phone": self._phone_status_payload(now=now),
+        }
+        return ServiceResponse(HTTPStatus.OK, payload)
+
+    def _phone_status_payload(self, *, now: float | None = None) -> dict[str, Any]:
+        current_time = time.time() if now is None else now
+        with self._phone_lock:
+            status = dict(self._phone_status or {})
+
+        if not status:
+            return {
+                "seen": False,
+                "status": "unseen",
+                "ok": False,
+                "stale_after_seconds": _PHONE_HEARTBEAT_STALE_SECONDS,
+                "last_seen_age_seconds": None,
+            }
+
+        last_seen = float(status.get("last_seen_at_epoch") or 0.0)
+        age = max(0.0, current_time - last_seen) if last_seen else None
+        available = bool(status.get("available", False))
+        if not available:
+            phone_status = "inactive"
+        elif age is not None and age > _PHONE_HEARTBEAT_STALE_SECONDS:
+            phone_status = "stale"
+        else:
+            phone_status = "ok"
+
+        status.update(
+            {
+                "status": phone_status,
+                "ok": phone_status == "ok",
+                "stale_after_seconds": _PHONE_HEARTBEAT_STALE_SECONDS,
+                "last_seen_age_seconds": round(age, 1) if age is not None else None,
+            }
+        )
+        return status
+
+    @staticmethod
+    def _epoch_to_utc(value: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
 
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, response: ServiceResponse) -> None:

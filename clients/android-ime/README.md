@@ -69,6 +69,21 @@ The IME checks `/v1/health` whenever the keyboard opens. If RomanVoice is not
 reachable, it shows `RomanVoice offline` before recording starts and offers a
 keyboard switch button.
 
+The floating mic service also sends an authenticated heartbeat to
+`/v1/phone/heartbeat` while it is active. The desktop service exposes
+`/v1/phone/status` so host checks can tell the difference between "RomanVoice is
+running on Windows" and "the phone Quick Settings tile is actually backed by an
+active floating service." Run this from the repo root when the tile looks dark,
+unavailable, or stale:
+
+```powershell
+.\scripts\check-phone-tile-health.ps1
+```
+
+With the Pixel connected over USB debugging, add `-RequireAdbDevice` to also
+verify the installed package, microphone permission, configured stream URL, and
+enabled `RomanVoice Floating Mic` accessibility service.
+
 For command-line install after USB debugging is enabled:
 
 ```powershell

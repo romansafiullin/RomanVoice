@@ -114,6 +114,25 @@ def post(url: str, body: bytes, *, token: str | None = None):
         return json.loads(response.read().decode("utf-8"))
 
 
+def post_json(url: str, payload: dict, *, token: str | None = None):
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_json(url: str, *, token: str | None = None):
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def recv_until(sock: socket.socket, marker: bytes) -> bytes:
     data = b""
     while marker not in data:
@@ -217,6 +236,73 @@ def test_service_transcribes_raw_audio_with_bearer_token():
     assert payload["used_polish"] is False
     assert controller.backend.seen_bytes == b"fake-audio"
     assert not controller.backend.seen_path.exists()
+
+
+def test_service_tracks_phone_floating_heartbeat_status():
+    controller = FakeController()
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        initial = get_json(f"{service.base_url}/v1/phone/status", token="secret")
+        heartbeat = post_json(
+            f"{service.base_url}/v1/phone/heartbeat",
+            {
+                "surface": "floating",
+                "event": "heartbeat",
+                "available": True,
+                "recording": False,
+                "connecting": False,
+            },
+            token="secret",
+        )
+        inactive = post_json(
+            f"{service.base_url}/v1/phone/heartbeat",
+            {
+                "surface": "tile",
+                "event": "floating_service_unavailable",
+                "available": False,
+                "recording": False,
+                "connecting": False,
+            },
+            token="secret",
+        )
+        detailed = get_json(f"{service.base_url}/v1/health", token="secret")
+    finally:
+        service.stop()
+
+    assert initial["phone"]["status"] == "unseen"
+    assert initial["phone"]["ok"] is False
+    assert heartbeat["phone"]["status"] == "ok"
+    assert heartbeat["phone"]["ok"] is True
+    assert heartbeat["phone"]["surface"] == "floating"
+    assert inactive["phone"]["status"] == "inactive"
+    assert inactive["phone"]["ok"] is False
+    assert inactive["phone"]["event"] == "floating_service_unavailable"
+    assert detailed["phone"]["status"] == "inactive"
+
+
+def test_service_rejects_unauthenticated_phone_status_and_heartbeat():
+    controller = FakeController()
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        for request in (
+            urllib.request.Request(f"{service.base_url}/v1/phone/status", method="GET"),
+            urllib.request.Request(
+                f"{service.base_url}/v1/phone/heartbeat",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+        ):
+            try:
+                urllib.request.urlopen(request, timeout=5)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 401
+            else:
+                raise AssertionError("Expected HTTP 401")
+    finally:
+        service.stop()
 
 
 def test_service_rejects_unauthenticated_streaming_websocket():

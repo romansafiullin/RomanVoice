@@ -41,6 +41,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final long TILE_FOCUS_RETRY_DELAY_MS = 150;
     private static final long IDLE_NOTICE_VISIBLE_MS = 1800;
     private static final long RESTART_WINDOW_VISIBLE_MS = 8000;
+    private static final long PHONE_HEARTBEAT_INTERVAL_MS = 60000;
 
     private static volatile RomanVoiceFloatingService activeService;
 
@@ -54,6 +55,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private TextView statusView;
     private Runnable hideIdleOverlayRunnable;
     private Runnable tileFocusRetryRunnable;
+    private Runnable phoneHeartbeatRunnable;
 
     private volatile boolean recording;
     private volatile boolean connecting;
@@ -105,6 +107,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         showOverlay();
         setStatus("Ready");
         notifyTileStateChanged();
+        startPhoneHeartbeat();
     }
 
     @Override
@@ -127,6 +130,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     @Override
     public void onDestroy() {
         stopRecording(false);
+        reportPhoneHeartbeat("destroyed", false);
+        cancelPhoneHeartbeat();
         removeOverlay();
         if (activeService == this) {
             activeService = null;
@@ -258,6 +263,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
         connecting = true;
         notifyTileStateChanged();
+        reportPhoneHeartbeat("connecting");
         setStatus("Connecting");
         setPillState(PILL_COLOR_CONNECTING, true);
         micButton.setEnabled(false);
@@ -281,6 +287,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     connecting = false;
                     setRecordingControls(true);
                     notifyTileStateChanged();
+                    reportPhoneHeartbeat("recording");
                 });
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice floating connection failed", exception);
@@ -291,6 +298,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     setStatus(shortError(exception));
                     setPillColor(PILL_COLOR_ERROR);
                     notifyTileStateChanged();
+                    reportPhoneHeartbeat("connection_failed");
                 });
             }
         }, "RomanVoiceFloatConnect").start();
@@ -386,6 +394,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     setRecordingControls(false);
                     setStatus("Ready");
                     notifyTileStateChanged();
+                    reportPhoneHeartbeat("ready");
                 });
             }
         }
@@ -409,6 +418,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             setStatus("Ready");
         }
         notifyTileStateChanged();
+        reportPhoneHeartbeat("canceled");
     }
 
     private void stopAudioRecord() {
@@ -442,6 +452,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         setPillColor(finalText.isEmpty() ? PILL_COLOR_ERROR : PILL_COLOR_RECORDED);
         resetLiveDictationState();
         notifyTileStateChanged();
+        reportPhoneHeartbeat("final");
     }
 
     private void handleStreamError(String message) {
@@ -454,6 +465,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         setPillColor(PILL_COLOR_ERROR);
         resetLiveDictationState();
         notifyTileStateChanged();
+        reportPhoneHeartbeat("stream_error");
     }
 
     private void writeDictationText(String dictationText) {
@@ -751,6 +763,40 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void notifyTileStateChanged() {
         RomanVoiceTileService.requestStateUpdate(this);
+    }
+
+    private void startPhoneHeartbeat() {
+        cancelPhoneHeartbeat();
+        phoneHeartbeatRunnable = new Runnable() {
+            @Override
+            public void run() {
+                reportPhoneHeartbeat("heartbeat");
+                mainHandler.postDelayed(this, PHONE_HEARTBEAT_INTERVAL_MS);
+            }
+        };
+        mainHandler.post(phoneHeartbeatRunnable);
+    }
+
+    private void cancelPhoneHeartbeat() {
+        if (phoneHeartbeatRunnable != null) {
+            mainHandler.removeCallbacks(phoneHeartbeatRunnable);
+            phoneHeartbeatRunnable = null;
+        }
+    }
+
+    private void reportPhoneHeartbeat(String event) {
+        reportPhoneHeartbeat(event, true);
+    }
+
+    private void reportPhoneHeartbeat(String event, boolean available) {
+        RomanVoicePhoneHeartbeat.reportAsync(
+                this,
+                "floating",
+                event,
+                available,
+                recording,
+                connecting
+        );
     }
 
     private String shortError(Exception exception) {

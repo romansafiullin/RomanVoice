@@ -77,6 +77,14 @@ public class RomanVoiceTileService extends TileService {
             default:
                 tile.setSubtitle("Enable Floating Mic");
                 tile.setState(Tile.STATE_UNAVAILABLE);
+                RomanVoicePhoneHeartbeat.reportAsync(
+                        this,
+                        "tile",
+                        "floating_service_unavailable",
+                        false,
+                        false,
+                        false
+                );
                 break;
         }
         tile.updateTile();

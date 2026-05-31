@@ -40,6 +40,20 @@ def test_phone_installer_defaults_to_floating_mic_workflow():
     assert "if ($SetRomanVoiceKeyboard)" in script
 
 
+def test_phone_tile_health_checker_covers_host_heartbeat_and_accessibility_state():
+    script = (PROJECT_ROOT / "scripts" / "check-phone-tile-health.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/v1/phone/status" in script
+    assert "enabled_accessibility_services" in script
+    assert "app.romanvoice.ime/app.romanvoice.ime.RomanVoiceFloatingService" in script
+    assert "STATE_UNAVAILABLE" not in script
+    assert "RomanVoice Floating Mic accessibility service is not enabled" in script
+    assert "Get-NetTCPConnection -LocalPort 8799" in script
+    assert "0.0.0.0" in script
+
+
 def test_android_manifest_declares_floating_accessibility_service():
     manifest = (ANDROID_IME_ROOT / "app" / "src" / "main" / "AndroidManifest.xml").read_text(
         encoding="utf-8"
@@ -99,6 +113,8 @@ def test_android_manifest_declares_quick_settings_tile_service():
     assert 'tile.setSubtitle("Listening")' in tile_source
     assert 'tile.setSubtitle("Connecting")' in tile_source
     assert 'tile.setSubtitle("Unlock first")' in tile_source
+    assert "RomanVoicePhoneHeartbeat.reportAsync" in tile_source
+    assert "floating_service_unavailable" in tile_source
     assert "GLOBAL_ACTION_BACK" not in tile_source
 
 
@@ -152,6 +168,31 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "setPillState(PILL_COLOR_RECORDED, true)" in source
     assert "showIdleNotice(\"Tap a text field first\")" in source
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
+    assert "PHONE_HEARTBEAT_INTERVAL_MS" in source
+    assert "startPhoneHeartbeat()" in source
+    assert "reportPhoneHeartbeat(\"destroyed\", false)" in source
+    assert "reportPhoneHeartbeat(\"connection_failed\")" in source
+
+
+def test_android_phone_heartbeat_posts_to_host_service():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoicePhoneHeartbeat.java"
+    ).read_text(encoding="utf-8")
+
+    assert "HttpURLConnection" in source
+    assert 'url.append("/v1/phone/heartbeat")' in source
+    assert 'connection.setRequestProperty("Authorization", "Bearer " + token)' in source
+    assert 'payload.put("surface"' in source
+    assert 'payload.put("event"' in source
+    assert 'payload.put("available"' in source
 
 
 def test_floating_service_retries_focus_after_quick_settings_tile():
