@@ -86,6 +86,27 @@ class FakeStreamingBackend:
         return text.strip()
 
 
+class FakeChunkingBackend:
+    name = "fake-chunking-whisper"
+    device_info = "chunk-device"
+
+    def __init__(self, text: str = "chunked long-form transcript"):
+        self.text = text
+        self.single_calls = 0
+        self.chunk_files = []
+
+    def transcribe(self, audio_path: str) -> str:
+        self.single_calls += 1
+        return "single pass transcript"
+
+    def transcribe_chunks(self, chunk_files):
+        self.chunk_files = list(chunk_files)
+        for chunk_file in self.chunk_files:
+            with wave.open(str(chunk_file), "rb") as wav_file:
+                assert wav_file.getnframes() > 0
+        return self.text
+
+
 class FakeRuntime:
     def __init__(self, backend):
         self.backend = backend
@@ -106,12 +127,35 @@ class FakeController:
 
 
 def post(url: str, body: bytes, *, token: str | None = None):
-    headers = {"Content-Type": "audio/webm;codecs=opus"}
+    return post_audio(url, body, content_type="audio/webm;codecs=opus", token=token)
+
+
+def post_audio(url: str, body: bytes, *, content_type: str, token: str | None = None):
+    headers = {"Content-Type": content_type}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def wav_bytes(duration_seconds: float, *, sample_rate: int = 16000, amplitude: int = 1200) -> bytes:
+    frame_count = int(duration_seconds * sample_rate)
+    frames = []
+    for index in range(frame_count):
+        sample = amplitude if (index // 80) % 2 == 0 else -amplitude
+        frames.append(struct.pack("<h", sample))
+    data = b"".join(frames)
+    buffer = bytearray()
+    import io
+
+    with io.BytesIO() as handle:
+        with wave.open(handle, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(data)
+        return handle.getvalue()
 
 
 def post_json(url: str, payload: dict, *, token: str | None = None):
@@ -236,6 +280,63 @@ def test_service_transcribes_raw_audio_with_bearer_token():
     assert payload["used_polish"] is False
     assert controller.backend.seen_bytes == b"fake-audio"
     assert not controller.backend.seen_path.exists()
+
+
+def test_service_chunks_long_http_audio_and_saves_recovery_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS", 1.0)
+    monkeypatch.setattr(config, "SERVICE_HTTP_SUSPECT_LOW_DENSITY_MIN_SECONDS", 999.0)
+    backend = FakeChunkingBackend("chunk one chunk two")
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        payload = post_audio(
+            f"{service.base_url}/v1/transcribe?polish=off",
+            wav_bytes(2.0),
+            content_type="audio/wav",
+            token="secret",
+        )
+    finally:
+        service.stop()
+
+    assert payload["ok"] is True
+    assert payload["text"] == "chunk one chunk two"
+    assert payload["final_source"] == "http_chunked_wav"
+    assert payload["chunk_count"] >= 1
+    assert payload["audio_duration_seconds"] == 2.0
+    assert payload["transcript_char_count"] == len("chunk one chunk two")
+    assert payload["suspect_truncated"] is False
+    assert payload["debug_audio_path"].endswith("romanvoice_service_upload_last.wav")
+    assert Path(payload["debug_audio_path"]).exists()
+    assert backend.single_calls == 0
+    assert backend.chunk_files
+
+
+def test_service_flags_suspiciously_short_long_http_transcript(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS", 1.0)
+    monkeypatch.setattr(config, "SERVICE_HTTP_SUSPECT_LOW_DENSITY_MIN_SECONDS", 1.0)
+    monkeypatch.setattr(config, "SERVICE_HTTP_SUSPECT_MIN_EXPECTED_CHARS", 100)
+    monkeypatch.setattr(config, "SERVICE_HTTP_SUSPECT_MIN_CHARS_PER_MINUTE", 1000.0)
+    backend = FakeChunkingBackend("tiny")
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        payload = post_audio(
+            f"{service.base_url}/v1/transcribe?polish=off",
+            wav_bytes(2.0),
+            content_type="audio/wav",
+            token="secret",
+        )
+    finally:
+        service.stop()
+
+    assert payload["text"] == "tiny"
+    assert payload["suspect_truncated"] is True
+    assert "Transcription looks incomplete" in payload["transcription_warning"]
+    assert payload["debug_audio_path"]
 
 
 def test_service_tracks_phone_floating_heartbeat_status():

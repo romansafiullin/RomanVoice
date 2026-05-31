@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -241,6 +242,7 @@ class RomanVoiceDictationService:
         polish_mode = (query.get("polish") or ["settings"])[0].strip().lower()
 
         temp_path = self._write_temp_audio(audio_bytes, content_type)
+        debug_audio_path = self._save_last_http_audio(temp_path, content_type)
         started = time.monotonic()
         try:
             payload = self._transcribe_file(
@@ -249,6 +251,7 @@ class RomanVoiceDictationService:
                 bytes_received=len(audio_bytes),
                 polish_mode=polish_mode,
                 started=started,
+                debug_audio_path=debug_audio_path,
             )
             return ServiceResponse(HTTPStatus.OK, payload)
         except Exception as exc:
@@ -353,6 +356,19 @@ class RomanVoiceDictationService:
             logger.debug("Failed to save last phone stream WAV", exc_info=True)
             return None
 
+    def _save_last_http_audio(self, audio_path: Path, content_type: str | None) -> str | None:
+        if not config.SERVICE_SAVE_LAST_HTTP_AUDIO:
+            return None
+        try:
+            suffix = audio_suffix_for_content_type(content_type) or audio_path.suffix or ".bin"
+            path = Path(config.RECORDINGS_FOLDER) / f"romanvoice_service_upload_last{suffix}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(audio_path, path)
+            return str(path)
+        except OSError:
+            logger.debug("Failed to save last service upload", exc_info=True)
+            return None
+
     @staticmethod
     def _pcm16_metrics(pcm_bytes: bytes, sample_rate: int) -> dict[str, Any]:
         aligned_length = len(pcm_bytes) - (len(pcm_bytes) % 2)
@@ -392,19 +408,38 @@ class RomanVoiceDictationService:
         bytes_received: int,
         polish_mode: str,
         started: float,
+        debug_audio_path: str | None = None,
     ) -> dict[str, Any]:
         lock = getattr(self.controller, "_transcription_lock", None)
         if lock is None:
             lock = threading.RLock()
 
+        preview = self._audio_file_preview(audio_path)
         with lock:
             backend = self.controller.transcription_runtime._select_backend_for_transcription()
             self.controller._active_transcription_backend = backend
             try:
-                raw_text = backend.transcribe(str(audio_path)).strip()
+                if self._should_chunk_http_audio(preview):
+                    raw_text, final_source, chunk_count = self._transcribe_http_chunks(backend, audio_path)
+                else:
+                    raw_text = backend.transcribe(str(audio_path)).strip()
+                    final_source = "http_final_file"
+                    chunk_count = 1
                 polished = self._maybe_polish(raw_text, polish_mode)
                 text = polished["text"]
                 device_info = getattr(backend, "device_info", "")
+                integrity = self._http_transcript_integrity(text, preview)
+                if integrity["suspect_truncated"]:
+                    logger.warning(
+                        "HTTP transcription looks too short for long audio "
+                        "(duration=%.1fs, chars=%s, chars_per_minute=%.1f, bytes=%s, source=%s, debug_audio=%s)",
+                        integrity["audio_duration_seconds"],
+                        integrity["transcript_char_count"],
+                        integrity["transcript_chars_per_minute"],
+                        bytes_received,
+                        final_source,
+                        debug_audio_path or "",
+                    )
                 return {
                     "ok": True,
                     "text": text,
@@ -414,12 +449,85 @@ class RomanVoiceDictationService:
                     "device_info": device_info,
                     "bytes_received": bytes_received,
                     "content_type": content_type or "application/octet-stream",
+                    "final_source": final_source,
+                    "chunk_count": chunk_count,
+                    "debug_audio_path": debug_audio_path,
+                    **integrity,
                     "used_polish": polished["used_polish"],
                     "polish_mode": polish_mode or "settings",
                     "duration_seconds": round(time.monotonic() - started, 3),
                 }
             finally:
                 self.controller._active_transcription_backend = None
+
+    def _audio_file_preview(self, audio_path: Path) -> dict[str, Any]:
+        try:
+            from services.audio_processor import audio_processor
+
+            preview = audio_processor.preview_file(str(audio_path))
+        except Exception as exc:
+            logger.info("Could not inspect service upload audio metadata: %s", exc)
+            return {}
+        return {
+            "audio_duration_seconds": round(float(preview.duration_seconds), 3),
+            "audio_sample_rate": int(preview.sample_rate),
+            "audio_channels": int(preview.channels),
+            "file_size_mb": round(float(preview.file_size_mb), 3),
+            "estimated_chunks": int(preview.estimated_chunks),
+        }
+
+    def _should_chunk_http_audio(self, preview: dict[str, Any]) -> bool:
+        duration = float(preview.get("audio_duration_seconds") or 0.0)
+        return duration >= float(config.SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS)
+
+    def _transcribe_http_chunks(self, backend: Any, audio_path: Path) -> tuple[str, str, int]:
+        from services.audio_processor import audio_processor
+
+        chunk_files = audio_processor.split_audio_file(str(audio_path))
+        try:
+            if hasattr(backend, "transcribe_chunks"):
+                text = str(backend.transcribe_chunks(chunk_files) or "").strip()
+            else:
+                parts = [str(backend.transcribe(chunk_file) or "").strip() for chunk_file in chunk_files]
+                text = audio_processor.combine_transcriptions(parts)
+            logger.info("HTTP long-form transcription used %s chunk(s)", len(chunk_files))
+            return text, "http_chunked_wav", len(chunk_files)
+        finally:
+            audio_processor.cleanup_temp_files()
+
+    def _http_transcript_integrity(self, text: str, preview: dict[str, Any]) -> dict[str, Any]:
+        duration = float(preview.get("audio_duration_seconds") or 0.0)
+        char_count = len((text or "").strip())
+        chars_per_minute = (char_count / (duration / 60.0)) if duration > 0 else 0.0
+        min_expected_chars = max(
+            int(config.SERVICE_HTTP_SUSPECT_MIN_EXPECTED_CHARS),
+            int((duration / 60.0) * float(config.SERVICE_HTTP_SUSPECT_MIN_CHARS_PER_MINUTE)),
+        )
+        suspect = (
+            duration >= float(config.SERVICE_HTTP_SUSPECT_LOW_DENSITY_MIN_SECONDS)
+            and char_count < min_expected_chars
+        )
+        warning = ""
+        if suspect:
+            warning = (
+                f"Transcription looks incomplete for {self._format_duration(duration)} of audio "
+                f"({char_count} chars). The uploaded audio was saved for recovery."
+            )
+        return {
+            **preview,
+            "transcript_char_count": char_count,
+            "transcript_chars_per_minute": round(chars_per_minute, 1) if duration > 0 else 0.0,
+            "suspect_truncated": suspect,
+            "transcription_warning": warning,
+        }
+
+    @staticmethod
+    def _format_duration(duration_seconds: float) -> str:
+        total = max(0, int(round(duration_seconds)))
+        minutes, seconds = divmod(total, 60)
+        if minutes:
+            return f"{minutes}m {seconds:02d}s"
+        return f"{seconds}s"
 
     def _handle_stream_websocket(
         self,

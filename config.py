@@ -44,6 +44,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
 def _start_hidden_default() -> bool:
     # The full window should only appear from an explicit UI/debug launcher.
     return not _env_bool("ROMANVOICE_FORCE_SHOW", False)
@@ -280,6 +290,26 @@ class AppConfig:
     SERVICE_SAVE_LAST_STREAM_WAV: bool = _env_bool(
         "ROMANVOICE_SERVICE_SAVE_LAST_STREAM_WAV",
         True,
+    )
+    SERVICE_SAVE_LAST_HTTP_AUDIO: bool = _env_bool(
+        "ROMANVOICE_SERVICE_SAVE_LAST_HTTP_AUDIO",
+        True,
+    )
+    SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS: float = _env_float(
+        "ROMANVOICE_SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS",
+        45.0,
+    )
+    SERVICE_HTTP_SUSPECT_LOW_DENSITY_MIN_SECONDS: float = _env_float(
+        "ROMANVOICE_SERVICE_HTTP_SUSPECT_LOW_DENSITY_MIN_SECONDS",
+        120.0,
+    )
+    SERVICE_HTTP_SUSPECT_MIN_CHARS_PER_MINUTE: float = _env_float(
+        "ROMANVOICE_SERVICE_HTTP_SUSPECT_MIN_CHARS_PER_MINUTE",
+        180.0,
+    )
+    SERVICE_HTTP_SUSPECT_MIN_EXPECTED_CHARS: int = _env_int(
+        "ROMANVOICE_SERVICE_HTTP_SUSPECT_MIN_EXPECTED_CHARS",
+        600,
     )
 
     # Streaming transcription settings
