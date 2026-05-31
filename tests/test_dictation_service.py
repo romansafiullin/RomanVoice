@@ -307,10 +307,33 @@ def test_service_chunks_long_http_audio_and_saves_recovery_copy(tmp_path, monkey
     assert payload["audio_duration_seconds"] == 2.0
     assert payload["transcript_char_count"] == len("chunk one chunk two")
     assert payload["suspect_truncated"] is False
-    assert payload["debug_audio_path"].endswith("romanvoice_service_upload_last.wav")
+    assert Path(payload["debug_audio_path"]).name.startswith("romanvoice_service_upload_")
     assert Path(payload["debug_audio_path"]).exists()
+    assert (tmp_path / "romanvoice_service_upload_last.wav").exists()
     assert backend.single_calls == 0
     assert backend.chunk_files
+
+
+def test_service_keeps_bounded_timestamped_http_upload_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "SERVICE_HTTP_DIAGNOSTIC_UPLOAD_KEEP_COUNT", 2)
+    controller = FakeController()
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        payloads = [
+            post(f"{service.base_url}/v1/transcribe?polish=off", f"fake-audio-{index}".encode(), token="secret")
+            for index in range(3)
+        ]
+    finally:
+        service.stop()
+
+    diagnostic_dir = tmp_path / "service_uploads"
+    uploads = sorted(diagnostic_dir.glob("romanvoice_service_upload_*"))
+    assert len(uploads) == 2
+    assert payloads[-1]["debug_audio_path"] == str(uploads[-1])
+    assert (tmp_path / "romanvoice_service_upload_last.webm").read_bytes() == b"fake-audio-2"
+    assert Path(payloads[0]["debug_audio_path"]).exists() is False
 
 
 def test_service_flags_suspiciously_short_long_http_transcript(tmp_path, monkeypatch):

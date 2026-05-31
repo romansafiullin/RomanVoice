@@ -361,13 +361,51 @@ class RomanVoiceDictationService:
             return None
         try:
             suffix = audio_suffix_for_content_type(content_type) or audio_path.suffix or ".bin"
-            path = Path(config.RECORDINGS_FOLDER) / f"romanvoice_service_upload_last{suffix}"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(audio_path, path)
-            return str(path)
+            recordings_dir = Path(config.RECORDINGS_FOLDER)
+            recordings_dir.mkdir(parents=True, exist_ok=True)
+            last_path = recordings_dir / f"romanvoice_service_upload_last{suffix}"
+            keep_count = max(0, int(config.SERVICE_HTTP_DIAGNOSTIC_UPLOAD_KEEP_COUNT))
+            if keep_count <= 0:
+                shutil.copyfile(audio_path, last_path)
+                return str(last_path)
+
+            diagnostic_dir = recordings_dir / "service_uploads"
+            diagnostic_dir.mkdir(parents=True, exist_ok=True)
+            diagnostic_path = self._unique_http_diagnostic_path(diagnostic_dir, suffix)
+            shutil.copyfile(audio_path, diagnostic_path)
+            shutil.copyfile(audio_path, last_path)
+            self._prune_http_diagnostic_uploads(diagnostic_dir, keep_count)
+            return str(diagnostic_path)
         except OSError:
             logger.debug("Failed to save last service upload", exc_info=True)
             return None
+
+    @staticmethod
+    def _unique_http_diagnostic_path(diagnostic_dir: Path, suffix: str) -> Path:
+        base = time.strftime("romanvoice_service_upload_%Y%m%d-%H%M%S")
+        millis = int((time.time() % 1) * 1000)
+        stem = f"{base}-{millis:03d}"
+        candidate = diagnostic_dir / f"{stem}{suffix}"
+        index = 1
+        while candidate.exists():
+            candidate = diagnostic_dir / f"{stem}-{index}{suffix}"
+            index += 1
+        return candidate
+
+    @staticmethod
+    def _prune_http_diagnostic_uploads(diagnostic_dir: Path, keep_count: int) -> None:
+        if keep_count <= 0:
+            return
+        uploads = sorted(
+            diagnostic_dir.glob("romanvoice_service_upload_*"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in uploads[keep_count:]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Failed to prune diagnostic service upload: %s", path)
 
     @staticmethod
     def _pcm16_metrics(pcm_bytes: bytes, sample_rate: int) -> dict[str, Any]:
