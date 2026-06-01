@@ -110,8 +110,11 @@ def test_android_manifest_declares_quick_settings_tile_service():
     assert "startActivityAndCollapseCompat(intent)" in tile_source
     assert "RomanVoiceFloatingService::requestToggleFromTile" in tile_action_source
     assert "TOGGLE_AFTER_FINISH_MS" in tile_action_source
-    assert 'tile.setSubtitle("Listening")' in tile_source
+    assert 'tile.setSubtitle("Recording")' in tile_source
     assert 'tile.setSubtitle("Connecting")' in tile_source
+    assert 'tile.setSubtitle("Ready")' in tile_source
+    assert 'tile.setContentDescription("RomanVoice ready. Tap to start dictation.")' in tile_source
+    assert 'tile.setContentDescription("RomanVoice recording. Tap to stop dictation.")' in tile_source
     assert 'tile.setSubtitle("Unlock first")' in tile_source
     assert "RomanVoicePhoneHeartbeat.reportAsync" in tile_source
     assert "floating_service_unavailable" in tile_source
@@ -157,9 +160,12 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "private static final boolean SHOW_CANCEL_BUTTON = false" in source
     assert "cancelButton.setOnClickListener(view -> cancelRecording())" in source
     assert 'micButton.setText("Start")' in source
+    assert 'micButton.setContentDescription("Start RomanVoice dictation")' in source
     assert 'micButton.setText(isRecording ? "Stop" : "Start")' in source
     assert "overlayView.setVisibility(View.GONE)" in source
-    assert "statusView.setVisibility(View.GONE)" in source
+    assert "statusView.setVisibility(View.VISIBLE)" in source
+    assert "statusView.setOnClickListener(view -> toggleRecording())" in source
+    assert "overlayView.setOnClickListener(view -> toggleRecording())" in source
     assert "RESTART_WINDOW_VISIBLE_MS = 8000" in source
     assert "cancelIdleOverlayHide()" in source
     assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true)" in source

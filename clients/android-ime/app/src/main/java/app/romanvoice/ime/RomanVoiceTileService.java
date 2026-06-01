@@ -62,20 +62,24 @@ public class RomanVoiceTileService extends TileService {
         TileState state = RomanVoiceFloatingService.getTileStateForTile();
         switch (state) {
             case LISTENING:
-                tile.setSubtitle("Listening");
+                tile.setSubtitle("Recording");
+                tile.setContentDescription("RomanVoice recording. Tap to stop dictation.");
                 tile.setState(Tile.STATE_ACTIVE);
                 break;
             case CONNECTING:
                 tile.setSubtitle("Connecting");
+                tile.setContentDescription("RomanVoice connecting.");
                 tile.setState(Tile.STATE_ACTIVE);
                 break;
             case READY:
                 tile.setSubtitle("Ready");
-                tile.setState(Tile.STATE_INACTIVE);
+                tile.setContentDescription("RomanVoice ready. Tap to start dictation.");
+                tile.setState(Tile.STATE_ACTIVE);
                 break;
             case UNAVAILABLE:
             default:
                 tile.setSubtitle("Enable Floating Mic");
+                tile.setContentDescription("Enable RomanVoice Floating Mic before dictating.");
                 tile.setState(Tile.STATE_UNAVAILABLE);
                 RomanVoicePhoneHeartbeat.reportAsync(
                         this,

@@ -31,7 +31,7 @@ import java.io.IOException;
 public class RomanVoiceFloatingService extends AccessibilityService {
     private static final String TAG = "RomanVoiceFloat";
     private static final int SAMPLE_RATE = 16000;
-    private static final int PILL_COLOR_IDLE = 0xEE25312C;
+    private static final int PILL_COLOR_IDLE = 0xEE2F7D4C;
     private static final int PILL_COLOR_CONNECTING = 0xEE5E6252;
     private static final int PILL_COLOR_RECORDING = 0xEEC8372D;
     private static final int PILL_COLOR_RECORDED = 0xEE2F7D4C;
@@ -153,6 +153,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
         micButton = new Button(this);
         micButton.setText("Start");
+        micButton.setContentDescription("Start RomanVoice dictation");
         micButton.setTextColor(Color.WHITE);
         micButton.setBackgroundColor(Color.TRANSPARENT);
         micButton.setMinWidth(0);
@@ -178,9 +179,19 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         statusView.setTextSize(12f);
         statusView.setSingleLine(true);
         statusView.setPadding(dp(8), 0, dp(2), 0);
-        statusView.setVisibility(View.GONE);
+        statusView.setVisibility(View.VISIBLE);
+        statusView.setOnClickListener(view -> toggleRecording());
+        statusView.setOnLongClickListener(view -> {
+            cancelRecording();
+            return true;
+        });
         overlayView.addView(statusView, new LinearLayout.LayoutParams(dp(116), dp(46)));
 
+        overlayView.setOnClickListener(view -> toggleRecording());
+        overlayView.setOnLongClickListener(view -> {
+            cancelRecording();
+            return true;
+        });
         overlayView.setOnTouchListener(new DragTouchListener());
 
         overlayParams = new WindowManager.LayoutParams(
@@ -720,8 +731,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true);
         if (micButton != null) {
             micButton.setText(isRecording ? "Stop" : "Start");
+            micButton.setContentDescription(
+                    isRecording ? "Stop RomanVoice dictation" : "Start RomanVoice dictation"
+            );
             micButton.setEnabled(true);
         }
+        setStatus(isRecording ? "Listening" : "Ready");
         if (cancelButton != null) {
             cancelButton.setVisibility(SHOW_CANCEL_BUTTON && isRecording ? View.VISIBLE : View.GONE);
         }
@@ -875,7 +890,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         @Override
         public void onStarted() {
             Log.i(TAG, "RomanVoice floating stream started");
-            mainHandler.post(() -> setPillState(PILL_COLOR_RECORDING, true));
+            mainHandler.post(() -> {
+                setStatus("Listening");
+                setPillState(PILL_COLOR_RECORDING, true);
+            });
         }
 
         @Override
