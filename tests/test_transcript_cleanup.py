@@ -72,6 +72,38 @@ def test_light_cleanup_normalizes_thousands_separator_spacing():
     assert text == "We have a balance of $8,000 and should apply $2,000."
 
 
+def test_light_cleanup_converts_spoken_punctuation_commands():
+    text = LocalWhisperBackend._clean_transcript_text(
+        "patch is live now comma Roman Voice app PID colon 169556"
+    )
+
+    assert text == "Patch is live now, Roman Voice app PID: 169556."
+
+
+def test_light_cleanup_keeps_literal_spoken_punctuation_references():
+    text = LocalWhisperBackend._clean_transcript_text(
+        "the word comma is repeated twice"
+    )
+
+    assert text == "The word comma is repeated twice."
+
+
+def test_light_cleanup_converts_spoken_paragraph_command():
+    text = LocalWhisperBackend._clean_transcript_text(
+        "first point period new paragraph second point"
+    )
+
+    assert text == "First point.\n\nSecond point."
+
+
+def test_light_cleanup_compacts_spoken_localhost_address():
+    text = LocalWhisperBackend._clean_transcript_text(
+        "service health colon OK on 127 period 0 period 0 period 1 colon 8799"
+    )
+
+    assert text == "Service health: OK on 127.0.0.1:8799."
+
+
 def test_deterministic_cleanup_applies_user_glossary(tmp_path):
     glossary = tmp_path / "transcript_glossary.json"
     glossary.write_text(

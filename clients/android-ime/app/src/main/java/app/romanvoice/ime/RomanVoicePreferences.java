@@ -23,6 +23,10 @@ final class RomanVoicePreferences {
         return prefs(context).getString(KEY_STREAM_URL, DEFAULT_STREAM_URL);
     }
 
+    static boolean isDefaultStreamUrl(String streamUrl) {
+        return DEFAULT_STREAM_URL.equals((streamUrl == null ? "" : streamUrl.trim()));
+    }
+
     static String token(Context context) {
         return prefs(context).getString(KEY_TOKEN, "");
     }

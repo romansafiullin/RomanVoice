@@ -12,6 +12,36 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+_SPOKEN_PUNCTUATION = {
+    "comma": ",",
+    "period": ".",
+    "full stop": ".",
+    "dot": ".",
+    "colon": ":",
+    "semicolon": ";",
+    "question mark": "?",
+    "exclamation point": "!",
+    "exclamation mark": "!",
+}
+_SPOKEN_PUNCTUATION_PATTERN = re.compile(
+    r"\b("
+    r"exclamation\s+(?:point|mark)|"
+    r"question\s+mark|"
+    r"full\s+stop|"
+    r"semicolon|"
+    r"comma|"
+    r"period|"
+    r"colon|"
+    r"dot"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_SPOKEN_PUNCTUATION_LITERAL_PREFIX_PATTERN = re.compile(
+    r"\b(?:word|term|phrase|literal|called|named|says?|said)\s+$",
+    flags=re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class CleanupRule:
     name: str
@@ -38,9 +68,11 @@ class DeterministicTranscriptCleaner:
         self.glossary_path = glossary_path
         self.glossary_enabled = glossary_enabled
         self.rules = (
+            CleanupRule("normalize_spoken_punctuation_commands", self._normalize_spoken_punctuation_commands),
             CleanupRule("normalize_dot_time_minutes", self._normalize_dot_time_minutes),
             CleanupRule("normalize_time_meridiems", self._normalize_time_meridiems),
             CleanupRule("normalize_punctuation_spacing", self._normalize_punctuation_spacing),
+            CleanupRule("normalize_network_addresses", self._normalize_network_addresses),
             CleanupRule("normalize_inline_fragment_breaks", self._normalize_inline_fragment_breaks),
             CleanupRule("normalize_thousands_separators", self._normalize_thousands_separators),
             CleanupRule("normalize_time_colons", self._normalize_time_colons),
@@ -64,6 +96,26 @@ class DeterministicTranscriptCleaner:
     @staticmethod
     def _normalize_whitespace(text: str) -> str:
         return re.sub(r"\s+", " ", text or "").strip()
+
+    @classmethod
+    def _normalize_spoken_punctuation_commands(cls, text: str) -> str:
+        text = re.sub(r"\bnew\s+paragraph\b", "\n\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bnew\s+line\b", "\n", text, flags=re.IGNORECASE)
+
+        def replace(match: re.Match) -> str:
+            if cls._is_literal_spoken_punctuation_reference(text, match.start()):
+                return match.group(0)
+            spoken = re.sub(r"\s+", " ", match.group(0).lower())
+            return _SPOKEN_PUNCTUATION.get(spoken, match.group(0))
+
+        text = _SPOKEN_PUNCTUATION_PATTERN.sub(replace, text)
+        text = re.sub(r" *\n\n *", "\n\n", text)
+        return re.sub(r" *\n *", "\n", text)
+
+    @staticmethod
+    def _is_literal_spoken_punctuation_reference(text: str, start_index: int) -> bool:
+        prefix = text[max(0, start_index - 32):start_index]
+        return bool(_SPOKEN_PUNCTUATION_LITERAL_PREFIX_PATTERN.search(prefix))
 
     @staticmethod
     def _normalize_dot_time_minutes(text: str) -> str:
@@ -102,6 +154,19 @@ class DeterministicTranscriptCleaner:
     def _normalize_punctuation_spacing(text: str) -> str:
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         return re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
+
+    @staticmethod
+    def _normalize_network_addresses(text: str) -> str:
+        text = re.sub(
+            r"\b(\d{1,3})\.\s+(\d{1,3})\.\s+(\d{1,3})\.\s+(\d{1,3})\b",
+            r"\1.\2.\3.\4",
+            text,
+        )
+        return re.sub(
+            r"\b((?:\d{1,3}\.){3}\d{1,3}):\s+(\d{2,5})\b",
+            r"\1:\2",
+            text,
+        )
 
     @staticmethod
     def _normalize_inline_fragment_breaks(text: str) -> str:

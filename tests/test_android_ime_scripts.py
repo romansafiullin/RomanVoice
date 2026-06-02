@@ -112,6 +112,7 @@ def test_android_manifest_declares_quick_settings_tile_service():
     assert "TOGGLE_AFTER_FINISH_MS" in tile_action_source
     assert 'tile.setSubtitle("Recording")' in tile_source
     assert 'tile.setSubtitle("Connecting")' in tile_source
+    assert 'tile.setSubtitle("Finishing")' in tile_source
     assert 'tile.setSubtitle("Ready")' in tile_source
     assert 'tile.setContentDescription("RomanVoice ready. Tap to start dictation.")' in tile_source
     assert 'tile.setContentDescription("RomanVoice recording. Tap to stop dictation.")' in tile_source
@@ -220,6 +221,124 @@ def test_floating_service_retries_focus_after_quick_settings_tile():
     assert "scheduleTileFocusRetry(retriesRemaining - 1)" in source
     assert "setStatus(\"Finding field\")" in source
     assert "cancelTileFocusRetry()" in source
+
+
+def test_android_voice_surfaces_use_phase_guards_and_watchdogs():
+    floating_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    ime_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+    phase_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceRecordingPhase.java"
+    ).read_text(encoding="utf-8")
+
+    for phase in ["IDLE", "CONNECTING", "RECORDING", "FINISHING", "ERROR"]:
+        assert phase in phase_source
+
+    for source in [floating_source, ime_source]:
+        assert "CONNECTING_TIMEOUT_MS = 10000" in source
+        assert "STOP_SEND_TIMEOUT_MS = 10000" in source
+        assert "FINAL_RESULT_TIMEOUT_MS = 90000" in source
+        assert "ERROR_RESET_MS = 3000" in source
+        assert "private void setPhase(RomanVoiceRecordingPhase nextPhase)" in source
+        assert "clearPhaseWatchdogs()" in source
+        assert "isBusyStartingOrFinishing()" in source
+        assert "phase != RomanVoiceRecordingPhase.IDLE" in source
+        assert "phase == RomanVoiceRecordingPhase.ERROR" in source
+        assert "phase != RomanVoiceRecordingPhase.CONNECTING" in source
+        assert "phase != RomanVoiceRecordingPhase.FINISHING" in source
+        assert "handlePhaseTimeout(\"Finishing timed out - try again" in source
+        assert "RomanVoicePreferences.isDefaultStreamUrl(streamUrl)" in source
+
+    assert "TILE_TOGGLE_DEBOUNCE_MS = 750" in floating_source
+    assert "lastTileToggleElapsedMs" in floating_source
+    assert "setOverlayClickTargetsEnabled(false)" in floating_source
+    assert "setOverlayClickTargetsEnabled(true)" in floating_source
+
+
+def test_android_audio_loops_snapshot_shared_recorder_and_client():
+    floating_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    ime_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+
+    for source in [floating_source, ime_source]:
+        assert "private volatile AudioRecord audioRecord;" in source
+        assert "private volatile RomanVoiceStreamClient client;" in source
+        assert "AudioRecord record = audioRecord;" in source
+        assert "RomanVoiceStreamClient streamClient = client;" in source
+        assert "record.read(buffer, 0, buffer.length)" in source
+        assert "streamClient.sendAudio(buffer, read)" in source
+        assert "catch (RuntimeException exception)" in source
+
+
+def test_android_stream_client_uses_connect_timeout_and_ping_keepalive():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceStreamClient.java"
+    ).read_text(encoding="utf-8")
+
+    assert "CONNECT_TIMEOUT_MS = 10000" in source
+    assert "PING_INTERVAL_MS = 5000" in source
+    assert "PONG_TIMEOUT_MS = 12000" in source
+    assert "socket.connect(new InetSocketAddress" in source
+    assert "socket.setSoTimeout(0)" in source
+    assert "keepAliveThread" in source
+    assert "sendFrame(0x9, new byte[]{})" in source
+    assert "frame.opcode == 0xA" in source
+    assert "outstandingPingAtMs = 0" in source
+    assert "RomanVoice stream ping timed out" in source
 
 
 def test_floating_service_falls_back_to_focused_editable_descendant():

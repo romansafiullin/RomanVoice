@@ -71,6 +71,17 @@ class StreamingRuntime:
 
     def on_partial_transcription(self, text: str, is_final: bool) -> None:
         """Handle partial transcription from the streaming worker."""
+        streamer = self.controller.streaming_transcriber
+        if streamer is None:
+            logger.debug("Dropping streaming callback with no active streamer")
+            return
+        if hasattr(streamer, "is_streaming") and not streamer.is_streaming:
+            logger.debug("Dropping streaming callback after streaming stopped")
+            return
+        if getattr(streamer, "_stop_requested", False):
+            logger.debug("Dropping streaming callback after stop was requested")
+            return
+
         next_text = text or ""
         self.controller._last_streaming_text = next_text
         if len(next_text) > len(getattr(self.controller, "_best_streaming_text", "")):
@@ -171,6 +182,7 @@ class StreamingRuntime:
                     backend=streaming_backend,
                     chunk_duration_sec=chunk_duration,
                     transcription_lock=self.controller._transcription_lock,
+                    vad_filter=config.STREAMING_VAD_ENABLED,
                 )
                 logger.info(
                     "Streaming transcription enabled "
@@ -215,22 +227,23 @@ class StreamingRuntime:
             if not self._text_injection_target_is_active():
                 return
 
-            result = text_injector.update_live_text(
-                self.controller._live_typed_text,
-                text,
-                key_delay_ms=int(
-                    settings.get(
-                        SettingsKey.TEXT_INJECTION_KEY_DELAY_MS,
-                        config.TEXT_INJECTION_KEY_DELAY_MS,
-                    )
-                ),
-            )
-            if result.success:
-                self.controller._live_typed_text = text
-                logger.info("Live typed streaming update (%s chars)", len(text))
-            else:
-                self.controller._live_typing_failed = True
-                logger.error("Live typing failed: %s", result.error)
+            with self.controller._live_typing_lock:
+                result = text_injector.update_live_text(
+                    self.controller._live_typed_text,
+                    text,
+                    key_delay_ms=int(
+                        settings.get(
+                            SettingsKey.TEXT_INJECTION_KEY_DELAY_MS,
+                            config.TEXT_INJECTION_KEY_DELAY_MS,
+                        )
+                    ),
+                )
+                if result.success:
+                    self.controller._live_typed_text = text
+                    logger.info("Live typed streaming update (%s chars)", len(text))
+                else:
+                    self.controller._live_typing_failed = True
+                    logger.error("Live typing failed: %s", result.error)
         except Exception as exc:
             self.controller._live_typing_failed = True
             logger.error("Live typing failed: %s", exc)

@@ -47,7 +47,7 @@ final class RomanVoicePhoneHeartbeat {
         String token = RomanVoicePreferences.token(context);
         if (streamUrl == null
                 || streamUrl.trim().isEmpty()
-                || streamUrl.contains("100.x.x.x")
+                || RomanVoicePreferences.isDefaultStreamUrl(streamUrl)
                 || token == null
                 || token.trim().isEmpty()) {
             return;

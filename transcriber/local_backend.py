@@ -259,8 +259,12 @@ class LocalWhisperBackend(TranscriptionBackend):
             segments, info = self.model.transcribe(
                 audio_path,
                 beam_size=config.FASTER_WHISPER_BEAM_SIZE,
+                language=config.FASTER_WHISPER_LANGUAGE,
                 condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
                 initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
+                compression_ratio_threshold=config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
+                log_prob_threshold=config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
+                no_speech_threshold=config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
                 vad_filter=config.FASTER_WHISPER_VAD_ENABLED,
                 vad_parameters=vad_params
             )
@@ -331,8 +335,12 @@ class LocalWhisperBackend(TranscriptionBackend):
                 segments, info = self.model.transcribe(
                     chunk_file,
                     beam_size=config.FASTER_WHISPER_BEAM_SIZE,
+                    language=config.FASTER_WHISPER_LANGUAGE,
                     condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
                     initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
+                    compression_ratio_threshold=config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
+                    log_prob_threshold=config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
+                    no_speech_threshold=config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
                     vad_filter=config.FASTER_WHISPER_VAD_ENABLED,
                     vad_parameters=vad_params
                 )

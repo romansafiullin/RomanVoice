@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from contextlib import nullcontext
+from threading import Event
 from typing import TYPE_CHECKING
 
 import pyperclip
@@ -42,6 +43,10 @@ if TYPE_CHECKING:
     from services.application_controller import ApplicationController
 
 logger = logging.getLogger(__name__)
+
+
+class _TranscriptionCanceled(Exception):
+    """Raised inside a worker when the current final transcription is canceled."""
 
 
 class TranscriptionRuntime:
@@ -172,7 +177,9 @@ class TranscriptionRuntime:
         )
         if not self.controller.recorder.is_recording:
             active_backend = self._get_active_transcription_backend()
-            if active_backend and active_backend.is_transcribing:
+            if self._is_final_transcription_in_flight() or (
+                active_backend and active_backend.is_transcribing
+            ):
                 logger.info("Start requested during transcription; canceling and restarting")
                 self._cancel_transcription()
             self.start_recording()
@@ -185,14 +192,15 @@ class TranscriptionRuntime:
 
         if self.controller.recorder.is_recording:
             self._cancel_recording()
-        elif (
-            self._get_active_transcription_backend()
-            and self._get_active_transcription_backend().is_transcribing
-        ):
-            self._cancel_transcription()
         else:
-            self.controller.overlay_state_update.emit(OverlayState.CANCELING)
-            self.controller.status_update.emit("Canceled")
+            active_backend = self._get_active_transcription_backend()
+            if self._is_final_transcription_in_flight() or (
+                active_backend and active_backend.is_transcribing
+            ):
+                self._cancel_transcription()
+            else:
+                self.controller.overlay_state_update.emit(OverlayState.CANCELING)
+                self.controller.status_update.emit("Canceled")
 
     def _cancel_recording(self) -> None:
         """Discard the active recording without transcribing."""
@@ -209,7 +217,10 @@ class TranscriptionRuntime:
 
     def _cancel_transcription(self) -> None:
         """Cancel an in-progress transcription job."""
-        self.controller._transcription_job_id += 1
+        with self.controller._transcription_job_lock:
+            self.controller._final_job_cancel.set()
+            self.controller._transcription_job_id += 1
+            self.controller._transcription_job_active = False
         active_backend = self._get_active_transcription_backend()
         if active_backend:
             active_backend.cancel_transcription()
@@ -267,9 +278,15 @@ class TranscriptionRuntime:
             logger.error(f"Failed to process uploaded audio: {exc}")
             self.on_transcription_error(f"Failed to process audio: {exc}")
 
-    def transcribe_audio_file(self, audio_path: str, job_id: int) -> None:
+    def transcribe_audio_file(
+        self,
+        audio_path: str,
+        job_id: int,
+        cancel_event: Event | None = None,
+    ) -> None:
         """Transcribe a single audio file in a background thread."""
         try:
+            self._raise_if_final_job_canceled(cancel_event)
             if self.controller._pending_file_size is None:
                 self.controller._pending_file_size = os.path.getsize(audio_path)
             self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
@@ -277,7 +294,8 @@ class TranscriptionRuntime:
             self.controller._transcription_start_time = time.time()
             lock = getattr(self.controller, "_transcription_lock", None)
             with lock if lock is not None else nullcontext():
-                backend = self._select_backend_for_transcription()
+                backend = self._select_backend_for_transcription(cancel_event)
+                self._raise_if_final_job_canceled(cancel_event)
                 self.controller._active_transcription_backend = backend
                 transcript = backend.transcribe(audio_path)
                 transcript = self._choose_transcript_with_streaming_guard(
@@ -290,20 +308,33 @@ class TranscriptionRuntime:
                 self.controller.transcription_completed.emit(transcript)
             else:
                 logger.info("Discarded stale transcription result for job %s", job_id)
+        except _TranscriptionCanceled:
+            logger.info("Final transcription job %s was canceled", job_id)
         except Exception as exc:
             logger.error(f"Transcription failed: {exc}")
             if self._is_current_job(job_id):
                 self.controller.transcription_failed.emit(str(exc))
         finally:
             self.controller._active_transcription_backend = None
+            if self._is_current_job(job_id):
+                with self.controller._transcription_job_lock:
+                    if self._is_current_job(job_id):
+                        self.controller._transcription_job_active = False
 
-    def transcribe_large_audio_file(self, audio_path: str, job_id: int) -> None:
+    def transcribe_large_audio_file(
+        self,
+        audio_path: str,
+        job_id: int,
+        cancel_event: Event | None = None,
+    ) -> None:
         """Transcribe a large audio file by splitting it into chunks."""
         chunk_files = []
-        if self.controller._pending_file_size is None:
-            self.controller._pending_file_size = os.path.getsize(audio_path)
-        self.controller._transcription_start_time = time.time()
         try:
+            self._raise_if_final_job_canceled(cancel_event)
+            if self.controller._pending_file_size is None:
+                self.controller._pending_file_size = os.path.getsize(audio_path)
+            self.controller._transcription_start_time = time.time()
+
             def progress_callback(message: str) -> None:
                 self.controller.status_update.emit(message)
 
@@ -315,7 +346,8 @@ class TranscriptionRuntime:
 
             lock = getattr(self.controller, "_transcription_lock", None)
             with lock if lock is not None else nullcontext():
-                backend = self._select_backend_for_transcription()
+                backend = self._select_backend_for_transcription(cancel_event)
+                self._raise_if_final_job_canceled(cancel_event)
                 self.controller._active_transcription_backend = backend
 
                 if hasattr(backend, "transcribe_chunks"):
@@ -331,6 +363,7 @@ class TranscriptionRuntime:
                         self.controller.status_update.emit(
                             f"Transcribing chunk {index + 1}/{len(chunk_files)}..."
                         )
+                        self._raise_if_final_job_canceled(cancel_event)
                         transcripts.append(backend.transcribe(chunk_file))
                     transcript = audio_processor.combine_transcriptions(transcripts)
 
@@ -345,12 +378,18 @@ class TranscriptionRuntime:
                 self.controller.transcription_completed.emit(transcript)
             else:
                 logger.info("Discarded stale large transcription result for job %s", job_id)
+        except _TranscriptionCanceled:
+            logger.info("Large final transcription job %s was canceled", job_id)
         except Exception as exc:
             logger.error(f"Large audio transcription failed: {exc}")
             if self._is_current_job(job_id):
                 self.controller.transcription_failed.emit(str(exc))
         finally:
             self.controller._active_transcription_backend = None
+            if self._is_current_job(job_id):
+                with self.controller._transcription_job_lock:
+                    if self._is_current_job(job_id):
+                        self.controller._transcription_job_active = False
             try:
                 audio_processor.cleanup_temp_files()
             except Exception as cleanup_error:
@@ -454,51 +493,73 @@ class TranscriptionRuntime:
         inserted_transcript = False
         text_injection_failed = False
         text_injection_target_changed = False
+        kept_live_preview = False
+        live_typing_uncertain = False
 
         if live_type_enabled:
             if not self._text_injection_target_is_active("final live typing"):
                 text_injection_target_changed = True
             else:
-                previous_live_text = self.controller._live_typed_text
-                result = text_injector.update_live_text(
-                    previous_live_text,
-                    transcript,
-                    key_delay_ms=key_delay_ms,
-                )
-                if result.success:
-                    self.controller._live_typed_text = transcript
-                    inserted_transcript = True
-                    logger.info("Live typed final transcript (%s chars)", len(transcript))
-                else:
-                    logger.error("Failed to reconcile live typed transcript: %s", result.error)
-                    if not previous_live_text:
-                        if not self._text_injection_target_is_active("fallback text injection"):
-                            text_injection_target_changed = True
+                with self.controller._live_typing_lock:
+                    previous_live_text = self.controller._live_typed_text
+                    if self.controller._live_typing_failed:
+                        live_typing_uncertain = True
+                        logger.warning(
+                            "Skipping final live typed reconciliation because "
+                            "streaming live typing already failed; copying final "
+                            "transcript to clipboard"
+                        )
+                    else:
+                        result = text_injector.update_live_text(
+                            previous_live_text,
+                            transcript,
+                            key_delay_ms=key_delay_ms,
+                            max_backspace_count=config.LIVE_FINAL_REWRITE_MAX_BACKSPACES,
+                            max_backspace_ratio=config.LIVE_FINAL_REWRITE_MAX_BACKSPACE_RATIO,
+                        )
+                        if result.success:
+                            self.controller._live_typed_text = transcript
+                            inserted_transcript = True
+                            logger.info("Live typed final transcript (%s chars)", len(transcript))
                         else:
-                            fallback = text_injector.inject(
-                                transcript,
-                                mode=injection_mode,
-                                key_delay_ms=key_delay_ms,
-                                long_text_threshold=long_text_threshold,
-                            )
-                            if fallback.success:
-                                inserted_transcript = True
-                                logger.info(
-                                    "Transcription inserted via %s after live typing failed",
-                                    fallback.method,
+                            if previous_live_text and result.method == "live_rewrite_limit":
+                                kept_live_preview = True
+                                logger.warning(
+                                    "Keeping live typed preview; final rewrite skipped: %s",
+                                    result.error,
                                 )
+                            elif not previous_live_text:
+                                logger.error(
+                                    "Failed to reconcile live typed transcript: %s",
+                                    result.error,
+                                )
+                                if not self._text_injection_target_is_active("fallback text injection"):
+                                    text_injection_target_changed = True
+                                else:
+                                    fallback = text_injector.inject(
+                                        transcript,
+                                        mode=injection_mode,
+                                        key_delay_ms=key_delay_ms,
+                                        long_text_threshold=long_text_threshold,
+                                    )
+                                    if fallback.success:
+                                        inserted_transcript = True
+                                        logger.info(
+                                            "Transcription inserted via %s after live typing failed",
+                                            fallback.method,
+                                        )
+                                    else:
+                                        text_injection_failed = True
+                                        logger.error(
+                                            "Failed to inject transcription after live typing failed: %s",
+                                            fallback.error,
+                                        )
                             else:
                                 text_injection_failed = True
-                                logger.error(
-                                    "Failed to inject transcription after live typing failed: %s",
-                                    fallback.error,
+                                logger.warning(
+                                    "Skipping full-text fallback because %s chars were already live typed",
+                                    len(previous_live_text),
                                 )
-                    else:
-                        text_injection_failed = True
-                        logger.warning(
-                            "Skipping full-text fallback because %s chars were already live typed",
-                            len(previous_live_text),
-                        )
 
         if auto_paste and not live_type_enabled:
             if not self._text_injection_target_is_active("final text injection"):
@@ -519,6 +580,12 @@ class TranscriptionRuntime:
 
         if inserted_transcript:
             self.controller.ui_controller.set_status("Ready (Pasted)")
+        elif kept_live_preview:
+            self.controller.ui_controller.set_status("Ready (Preview kept)")
+        elif live_typing_uncertain:
+            self.controller.ui_controller.set_status(
+                "Transcription complete (live typing uncertain; copied)"
+            )
         elif text_injection_target_changed:
             self.controller.ui_controller.set_status(
                 "Transcription complete (target changed; copied)"
@@ -530,10 +597,15 @@ class TranscriptionRuntime:
         else:
             self.controller.ui_controller.set_status("Ready")
 
-        if copy_clipboard or text_injection_target_changed:
+        if copy_clipboard or text_injection_target_changed or live_typing_uncertain:
             try:
                 pyperclip.copy(transcript)
-                if text_injection_target_changed and not copy_clipboard:
+                if live_typing_uncertain and not copy_clipboard:
+                    logger.info(
+                        "Transcription copied to clipboard because live typing "
+                        "state was uncertain"
+                    )
+                elif text_injection_target_changed and not copy_clipboard:
                     logger.info(
                         "Transcription copied to clipboard because focused target changed"
                     )
@@ -614,6 +686,19 @@ class TranscriptionRuntime:
         """Handle model selection change."""
         model_value = config.MODEL_VALUE_MAP.get(model_name)
         if model_value and model_value in self.controller.transcription_backends:
+            active_backend = self._get_active_transcription_backend()
+            if self._is_final_transcription_in_flight() or (
+                active_backend and active_backend.is_transcribing
+            ):
+                logger.info(
+                    "Ignoring model change to %s while final transcription is in flight",
+                    model_value,
+                )
+                self.controller.status_update.emit(
+                    "Finish or cancel transcription before changing models"
+                )
+                return
+
             self.controller.current_backend = self.controller.transcription_backends[
                 model_value
             ]
@@ -641,38 +726,69 @@ class TranscriptionRuntime:
             overlay.show_at_cursor(overlay.STATE_LARGE_FILE_PROCESSING)
 
     def _submit_transcription_job(self, audio_path: str) -> None:
-        self.controller._transcription_job_id += 1
-        job_id = self.controller._transcription_job_id
         needs_splitting, file_size_mb = audio_processor.check_file_size(audio_path)
         should_split = (
             needs_splitting and self.controller.current_backend.requires_file_splitting
         )
+        with self.controller._transcription_job_lock:
+            if self.controller._transcription_job_active:
+                self.controller._final_job_cancel.set()
+                logger.info("Canceling previous final transcription before submitting a new job")
+            self.controller._transcription_job_id += 1
+            job_id = self.controller._transcription_job_id
+            cancel_event = Event()
+            self.controller._final_job_cancel = cancel_event
+            self.controller._transcription_job_active = True
 
-        if should_split:
-            logger.info(
-                f"Large file ({file_size_mb:.2f} MB), backend requires splitting"
-            )
-            self.show_large_file_overlay(file_size_mb, is_splitting=True)
-            self.controller.status_update.emit(
-                f"Splitting large file ({file_size_mb:.1f} MB)..."
-            )
-            self.controller.executor.submit(
-                self.transcribe_large_audio_file, audio_path, job_id
-            )
-        elif needs_splitting:
-            logger.info(
-                f"Large file ({file_size_mb:.2f} MB), processing without splitting"
-            )
-            self.show_large_file_overlay(file_size_mb, is_splitting=False)
-            self.controller.status_update.emit(
-                f"Processing large file ({file_size_mb:.1f} MB)..."
-            )
-            self.controller.executor.submit(self.transcribe_audio_file, audio_path, job_id)
-        else:
-            self.controller.executor.submit(self.transcribe_audio_file, audio_path, job_id)
+        try:
+            if should_split:
+                logger.info(
+                    f"Large file ({file_size_mb:.2f} MB), backend requires splitting"
+                )
+                self.show_large_file_overlay(file_size_mb, is_splitting=True)
+                self.controller.status_update.emit(
+                    f"Splitting large file ({file_size_mb:.1f} MB)..."
+                )
+                self.controller.executor.submit(
+                    self.transcribe_large_audio_file,
+                    audio_path,
+                    job_id,
+                    cancel_event,
+                )
+            elif needs_splitting:
+                logger.info(
+                    f"Large file ({file_size_mb:.2f} MB), processing without splitting"
+                )
+                self.show_large_file_overlay(file_size_mb, is_splitting=False)
+                self.controller.status_update.emit(
+                    f"Processing large file ({file_size_mb:.1f} MB)..."
+                )
+                self.controller.executor.submit(
+                    self.transcribe_audio_file,
+                    audio_path,
+                    job_id,
+                    cancel_event,
+                )
+            else:
+                self.controller.executor.submit(
+                    self.transcribe_audio_file,
+                    audio_path,
+                    job_id,
+                    cancel_event,
+                )
+        except Exception:
+            with self.controller._transcription_job_lock:
+                if self._is_current_job(job_id):
+                    cancel_event.set()
+                    self.controller._transcription_job_active = False
+            raise
 
     def _is_current_job(self, job_id: int) -> bool:
         return job_id == self.controller._transcription_job_id
+
+    def _is_final_transcription_in_flight(self) -> bool:
+        """True from final job submission until completion/cancel, including CUDA waits."""
+        return bool(getattr(self.controller, "_transcription_job_active", False))
 
     def _complete_short_form_from_streaming(self) -> bool:
         duration = self.controller._pending_audio_duration or 0.0
@@ -682,6 +798,7 @@ class TranscriptionRuntime:
             and len(streaming_text) >= config.SHORT_FORM_FINAL_SKIP_MIN_CHARS
         ):
             self.controller._transcription_job_id += 1
+            self.controller._transcription_job_active = False
             self.controller._streaming_guard_evaluated = True
             self.controller._transcription_start_time = time.time()
             self.controller.overlay_state_update.emit(OverlayState.NONE)
@@ -712,6 +829,7 @@ class TranscriptionRuntime:
             return False
 
         self.controller._transcription_job_id += 1
+        self.controller._transcription_job_active = False
         self.controller._streaming_guard_evaluated = True
         self.controller._transcription_start_time = time.time()
         self.controller.overlay_state_update.emit(OverlayState.NONE)
@@ -746,7 +864,7 @@ class TranscriptionRuntime:
             return True
 
         focus_token = getattr(self.controller, "_text_injection_focus_token", None)
-        if checker(focus_token):
+        if self._focus_token_active_with_recheck(checker, focus_token, action):
             return True
 
         if not getattr(self.controller, "_text_injection_target_lost_logged", False):
@@ -757,26 +875,59 @@ class TranscriptionRuntime:
             self.controller._text_injection_target_lost_logged = True
         return False
 
+    @staticmethod
+    def _focus_token_active_with_recheck(checker, focus_token, action: str) -> bool:
+        if checker(focus_token):
+            return True
+
+        recheck_ms = max(0, int(config.TEXT_INJECTION_FOCUS_RECHECK_MS))
+        if recheck_ms <= 0:
+            return False
+
+        interval_seconds = max(
+            0.01,
+            int(config.TEXT_INJECTION_FOCUS_RECHECK_INTERVAL_MS) / 1000.0,
+        )
+        deadline = time.monotonic() + (recheck_ms / 1000.0)
+        while time.monotonic() < deadline:
+            time.sleep(min(interval_seconds, max(0.0, deadline - time.monotonic())))
+            if checker(focus_token):
+                logger.info(
+                    "Focused text target recovered before %s after a transient mismatch",
+                    action,
+                )
+                return True
+
+        return False
+
     def _get_active_transcription_backend(self):
         return (
             getattr(self.controller, "_active_transcription_backend", None)
             or self.controller.current_backend
         )
 
-    def _select_backend_for_transcription(self):
+    def _select_backend_for_transcription(self, cancel_event: Event | None = None):
         backend = self.controller.current_backend
         if not self._should_guard_cuda_backend(backend):
             return backend
 
+        self._raise_if_final_job_canceled(cancel_event)
         if gpu_guard.wait_for_cuda_budget(
             "final transcription",
             max_wait_ms=config.GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS,
+            cancel_event=cancel_event,
         ):
+            self._raise_if_final_job_canceled(cancel_event)
             return backend
+        self._raise_if_final_job_canceled(cancel_event)
 
         logger.warning("Using CPU fallback because CUDA is still busy")
         self.controller.status_update.emit("GPU busy; using CPU fallback...")
         return self._get_cpu_fallback_backend()
+
+    def _raise_if_final_job_canceled(self, cancel_event: Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _TranscriptionCanceled("Transcription canceled")
 
     def _should_guard_cuda_backend(self, backend) -> bool:
         return (

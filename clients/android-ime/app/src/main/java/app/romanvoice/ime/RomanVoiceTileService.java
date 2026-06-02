@@ -71,6 +71,11 @@ public class RomanVoiceTileService extends TileService {
                 tile.setContentDescription("RomanVoice connecting.");
                 tile.setState(Tile.STATE_ACTIVE);
                 break;
+            case FINISHING:
+                tile.setSubtitle("Finishing");
+                tile.setContentDescription("RomanVoice finishing dictation.");
+                tile.setState(Tile.STATE_ACTIVE);
+                break;
             case READY:
                 tile.setSubtitle("Ready");
                 tile.setContentDescription("RomanVoice ready. Tap to start dictation.");

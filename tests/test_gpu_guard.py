@@ -1,5 +1,7 @@
+from threading import Event
+
 from config import config
-from services.gpu_guard import GPUStatus
+from services.gpu_guard import GPUGuard, GPUStatus
 
 
 def test_busy_reason_ignores_romanvoice_cuda_memory_when_configured(monkeypatch):
@@ -48,3 +50,23 @@ def test_busy_reason_uses_raw_memory_when_self_memory_ignore_is_disabled(monkeyp
 
     assert status.effective_memory_free_mb == 1292
     assert status.busy_reason() == "free memory 1292 MB"
+
+
+def test_wait_for_cuda_budget_returns_false_when_canceled(monkeypatch):
+    monkeypatch.setattr(config, "GPU_COOPERATIVE_MODE", True)
+    guard = GPUGuard()
+    cancel_event = Event()
+    cancel_event.set()
+    queries = []
+    monkeypatch.setattr(
+        guard,
+        "query_status",
+        lambda: queries.append(True) or GPUStatus(available=True),
+    )
+
+    assert guard.wait_for_cuda_budget(
+        "final transcription",
+        max_wait_ms=1000,
+        cancel_event=cancel_event,
+    ) is False
+    assert queries == []

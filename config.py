@@ -237,11 +237,32 @@ class AppConfig:
     FASTER_WHISPER_VAD_ENABLED: bool = True
     FASTER_WHISPER_VAD_MIN_SILENCE_MS: int = 400
     FASTER_WHISPER_BEAM_SIZE: int = 5
-    FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT: bool = True
+    FASTER_WHISPER_LANGUAGE: str = os.environ.get(
+        "ROMANVOICE_FASTER_WHISPER_LANGUAGE",
+        "en",
+    ).strip() or "en"
+    FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT: bool = _env_bool(
+        "ROMANVOICE_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        False,
+    )
+    FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD: float = _env_float(
+        "ROMANVOICE_FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD",
+        2.4,
+    )
+    FASTER_WHISPER_LOG_PROB_THRESHOLD: float = _env_float(
+        "ROMANVOICE_FASTER_WHISPER_LOG_PROB_THRESHOLD",
+        -1.0,
+    )
+    FASTER_WHISPER_NO_SPEECH_THRESHOLD: float = _env_float(
+        "ROMANVOICE_FASTER_WHISPER_NO_SPEECH_THRESHOLD",
+        0.6,
+    )
     FASTER_WHISPER_INITIAL_PROMPT: str = (
-        "This is English voice dictation. Transcribe with natural punctuation, "
-        "sentence capitalization, and paragraph-like clarity while preserving the "
-        "speaker's wording."
+        "This is English voice dictation for an engineering note. Use normal "
+        "punctuation and capitalization. Convert spoken punctuation commands "
+        "like comma, period, colon, semicolon, question mark, exclamation point, "
+        "and new paragraph into punctuation when they are used as commands. "
+        "Preserve the speaker's wording otherwise."
     )
     FASTER_WHISPER_LIGHT_CLEANUP: bool = True
     TRANSCRIPT_GLOSSARY_ENABLED: bool = True
@@ -255,7 +276,11 @@ class AppConfig:
     TEXT_INJECTION_MODE: str = "unicode"  # "unicode" or "clipboard"
     TEXT_INJECTION_LONG_TEXT_THRESHOLD: int = 5000
     TEXT_INJECTION_KEY_DELAY_MS: int = 0
+    TEXT_INJECTION_FOCUS_RECHECK_MS: int = 350
+    TEXT_INJECTION_FOCUS_RECHECK_INTERVAL_MS: int = 50
     LIVE_TYPE_ENABLED: bool = True
+    LIVE_FINAL_REWRITE_MAX_BACKSPACES: int = 120
+    LIVE_FINAL_REWRITE_MAX_BACKSPACE_RATIO: float = 0.35
 
     # Optional local polishing through an external Ollama install
     POLISH_ENABLED: bool = False
@@ -275,6 +300,10 @@ class AppConfig:
     GPU_BUSY_WARMUP_RETRY_MS: int = 30000
     GPU_COOPERATIVE_MONITOR_MS: int = 30000
     GPU_COOPERATIVE_RELOAD_COOLDOWN_MS: int = 180000
+    GPU_COOPERATIVE_UNLOAD_ON_BUSY: bool = _env_bool(
+        "ROMANVOICE_GPU_COOPERATIVE_UNLOAD_ON_BUSY",
+        False,
+    )
     GPU_BUSY_SKIP_STREAMING_PREVIEW: bool = False
     GPU_IGNORE_OWN_CUDA_MEMORY: bool = True
     GPU_BUSY_CPU_FALLBACK_MODEL: str = "base"
@@ -321,6 +350,7 @@ class AppConfig:
     STREAMING_CHUNK_DURATION_SEC: float = 2.0  # Process every N seconds
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
+    STREAMING_VAD_ENABLED: bool = _env_bool("ROMANVOICE_STREAMING_VAD_ENABLED", True)
     SHORT_FORM_FINAL_SKIP_MAX_SECONDS: float = 4.0
     SHORT_FORM_FINAL_SKIP_MIN_CHARS: int = 10
     GPU_BUSY_STREAMING_FINAL_SKIP_MAX_SECONDS: float = 30.0

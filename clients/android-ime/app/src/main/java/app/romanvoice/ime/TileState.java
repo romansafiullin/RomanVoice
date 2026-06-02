@@ -4,5 +4,6 @@ enum TileState {
     UNAVAILABLE,
     READY,
     CONNECTING,
-    LISTENING
+    LISTENING,
+    FINISHING
 }

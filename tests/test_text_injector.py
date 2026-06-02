@@ -77,6 +77,27 @@ def test_update_live_text_replaces_corrected_suffix():
     assert typed == [("orld", 0)]
 
 
+def test_update_live_text_rejects_excessive_rewrite_before_mutating():
+    injector = TextInjector()
+    typed = []
+    backspaces = []
+
+    injector._send_backspaces = lambda count: backspaces.append(count) or InjectionResult(True, "backspace")
+    injector._inject_unicode = lambda text, key_delay_ms=0: typed.append((text, key_delay_ms)) or InjectionResult(True, "unicode")
+
+    result = injector.update_live_text(
+        "a" * 200,
+        "b" * 200,
+        max_backspace_count=50,
+        max_backspace_ratio=0.25,
+    )
+
+    assert result.success is False
+    assert result.method == "live_rewrite_limit"
+    assert backspaces == []
+    assert typed == []
+
+
 def test_clipboard_fallback_uses_native_paste_before_restore(monkeypatch):
     injector = TextInjector()
     calls = []

@@ -58,6 +58,7 @@ class ApplicationController(QObject):
         self._cpu_fallback_backend = None
         self._shutdown_requested = Event()
         self._transcription_lock = RLock()
+        self._transcription_job_lock = RLock()
         self.dictation_service = None
 
         self.transcription_backends: Dict[str, TranscriptionBackend] = {}
@@ -72,9 +73,11 @@ class ApplicationController(QObject):
         self._streaming_guard_evaluated = False
         self._live_typed_text = ""
         self._live_typing_failed = False
+        self._live_typing_lock = RLock()
         self._text_injection_focus_token: Optional[int] = None
         self._text_injection_target_lost_logged = False
         self._last_gpu_unload_time = 0.0
+        self._last_gpu_unload_skip_log_time = 0.0
         self._last_gpu_warmup_defer_log_time = 0.0
         self._silence_auto_stop_started_at = 0.0
         self._last_voice_activity_time = 0.0
@@ -85,6 +88,8 @@ class ApplicationController(QObject):
         self._pending_file_size: Optional[int] = None
         self._transcription_start_time: Optional[float] = None
         self._transcription_job_id = 0
+        self._transcription_job_active = False
+        self._final_job_cancel = Event()
 
         self.hotkey_runtime = HotkeyRuntime(self)
         self.streaming_runtime = StreamingRuntime(self)
@@ -238,7 +243,9 @@ class ApplicationController(QObject):
             return
 
         active_backend = self._active_transcription_backend or self.current_backend
-        if self.recorder.is_recording or (
+        # _transcription_job_active covers queued/CUDA-waiting final jobs;
+        # backend.is_transcribing only covers active model inference.
+        if self.recorder.is_recording or self._transcription_job_active or (
             active_backend and active_backend.is_transcribing
         ):
             return
@@ -252,6 +259,18 @@ class ApplicationController(QObject):
             and local_backend.is_available()
             and not local_backend.is_loading
         ):
+            if not config.GPU_COOPERATIVE_UNLOAD_ON_BUSY:
+                now = time.monotonic()
+                if now - self._last_gpu_unload_skip_log_time >= 60.0:
+                    logger.warning(
+                        "Keeping Whisper loaded while CUDA is busy; automatic "
+                        "cleanup is disabled because faster-whisper teardown is "
+                        "not stable on this Windows runtime (%s)",
+                        busy_reason,
+                    )
+                    self._last_gpu_unload_skip_log_time = now
+                return
+
             logger.info("Unloading Whisper while CUDA is busy: %s", busy_reason)
             self._last_gpu_unload_time = time.monotonic()
             self.device_info_update.emit("Whisper unloaded while GPU busy")
@@ -431,9 +450,15 @@ class ApplicationController(QObject):
 
         try:
             active_backend = self._active_transcription_backend or self.current_backend
-            if active_backend and active_backend.is_transcribing:
-                logger.info("Canceling ongoing transcription...")
-                active_backend.cancel_transcription()
+            # During shutdown, cancel queued/CUDA-waiting final jobs as well as
+            # backend calls that are already inside model inference.
+            if self._transcription_job_active or (
+                active_backend and active_backend.is_transcribing
+            ):
+                logger.info("Canceling ongoing final transcription...")
+                self._final_job_cancel.set()
+                if active_backend:
+                    active_backend.cancel_transcription()
         except Exception as exc:
             logger.debug(f"Error canceling transcription: {exc}")
 

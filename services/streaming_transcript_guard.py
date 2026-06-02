@@ -12,6 +12,11 @@ _PREFIX_MISSING_MIN_CHARS = 80
 _FINAL_PREFIX_OFFSET_MAX_CHARS = 40
 _OVERLAP_MIN_CHARS = 180
 _OVERLAP_FINAL_RATIO = 0.55
+_NON_LATIN_SCRIPT_RE = re.compile(
+    r"[\u0370-\u03ff\u0400-\u04ff\u0590-\u05ff\u0600-\u06ff"
+    r"\u0900-\u097f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+)
+_REPEATED_WORD_RUN_MIN = 6
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,15 @@ def choose_streaming_transcript(
     ):
         return StreamingTranscriptDecision(
             False,
+            char_delta=char_delta,
+            final_ratio=final_ratio,
+        )
+
+    streaming_issue = _quality_issue(streaming_text)
+    if streaming_issue and not _quality_issue(final_text):
+        return StreamingTranscriptDecision(
+            False,
+            reason=f"streaming_suspicious_{streaming_issue}",
             char_delta=char_delta,
             final_ratio=final_ratio,
         )
@@ -125,3 +139,28 @@ def _prefix_truncation_decision(
 
 def _normalize_for_overlap(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().lower()
+
+
+def _quality_issue(text: str) -> str:
+    """Return a reason when a transcript has obvious hallucination markers."""
+    if "\ufffd" in text:
+        return "replacement_char"
+    if _NON_LATIN_SCRIPT_RE.search(text):
+        return "non_latin_script"
+    if _has_repeated_word_run(text):
+        return "repeated_word_run"
+    return ""
+
+
+def _has_repeated_word_run(text: str) -> bool:
+    previous = None
+    run_length = 0
+    for token in re.findall(r"[A-Za-z']+", (text or "").lower()):
+        if token == previous:
+            run_length += 1
+        else:
+            previous = token
+            run_length = 1
+        if run_length >= _REPEATED_WORD_RUN_MIN:
+            return True
+    return False

@@ -3,6 +3,7 @@
 import importlib
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -177,6 +178,7 @@ class FakeLocalBackend:
         self.uses_cuda = True
         self.available = True
         self.cleaned_up = False
+        self.transcribed_paths = []
 
     def ensure_loaded(self):
         self.available = True
@@ -185,6 +187,7 @@ class FakeLocalBackend:
         return self.available
 
     def transcribe(self, audio_path):
+        self.transcribed_paths.append(audio_path)
         return f"local:{audio_path}"
 
     def transcribe_chunks(self, chunk_files):
@@ -207,16 +210,22 @@ class FakeStreamingTranscriber:
         self.transcription_lock = kwargs.get("transcription_lock")
         self.cleaned_up = False
         self.started = False
+        self.is_streaming = False
+        self._stop_requested = False
 
     def feed_audio(self, _audio):
         pass
 
     def start_streaming(self, sample_rate, callback):
         self.started = True
+        self.is_streaming = True
+        self._stop_requested = False
         self.sample_rate = sample_rate
         self.callback = callback
 
     def stop_streaming(self):
+        self._stop_requested = True
+        self.is_streaming = False
         return "partial text"
 
     def cleanup(self):
@@ -284,12 +293,14 @@ class FakeTextInjector:
         self.injections = []
         self.focus_token = "focus-1"
         self.focus_active = True
+        self.focus_active_sequence = []
         self.focus_captures = []
         self.focus_checks = []
         self.live_result = types.SimpleNamespace(
             success=True, method="live_unicode", error=None
         )
         self.inject_result = None
+        self.live_update_options = []
 
     def capture_focus_token(self):
         self.focus_captures.append(True)
@@ -299,10 +310,26 @@ class FakeTextInjector:
         self.focus_checks.append(focus_token)
         if focus_token is None:
             return True
+        if self.focus_active_sequence:
+            return self.focus_active_sequence.pop(0)
         return self.focus_active
 
-    def update_live_text(self, previous_text, next_text, *, key_delay_ms=0):
+    def update_live_text(
+        self,
+        previous_text,
+        next_text,
+        *,
+        key_delay_ms=0,
+        max_backspace_count=None,
+        max_backspace_ratio=None,
+    ):
         self.live_updates.append((previous_text, next_text, key_delay_ms))
+        self.live_update_options.append(
+            {
+                "max_backspace_count": max_backspace_count,
+                "max_backspace_ratio": max_backspace_ratio,
+            }
+        )
         return self.live_result
 
     def inject(
@@ -566,6 +593,19 @@ class TestApplicationController(unittest.TestCase):
         self.assertEqual(controller._current_model_name, "local_whisper")
         self.assertEqual(controller.ui_controller.device_infos[-1], "cpu")
 
+    def test_model_change_is_blocked_while_final_job_is_queued(self):
+        controller = self._create_controller()
+        original_backend = controller.current_backend
+        controller._transcription_job_active = True
+
+        controller.on_model_changed("Local Whisper")
+
+        self.assertIs(controller.current_backend, original_backend)
+        self.assertIn(
+            "Finish or cancel transcription before changing models",
+            controller.ui_controller.statuses,
+        )
+
     def test_streaming_reconfigure_can_disable_runtime(self):
         controller = self._create_controller()
         self.assertIsNotNone(controller.streaming_transcriber)
@@ -667,6 +707,74 @@ class TestApplicationController(unittest.TestCase):
             controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
         )
 
+    def test_submit_transcription_job_cancels_previous_job_event(self):
+        controller = self._create_controller()
+        previous_cancel = controller._final_job_cancel
+        controller._transcription_job_active = True
+        controller._transcription_job_id = 4
+
+        controller.transcription_runtime._submit_transcription_job("next.wav")
+
+        self.assertTrue(previous_cancel.is_set())
+        self.assertTrue(controller._transcription_job_active)
+        self.assertEqual(controller._transcription_job_id, 5)
+        self.assertIsNot(controller._final_job_cancel, previous_cancel)
+        self.assertFalse(controller._final_job_cancel.is_set())
+        self.assertEqual(
+            controller.executor.submissions[-1][0].__name__,
+            "transcribe_audio_file",
+        )
+        self.assertIs(
+            controller.executor.submissions[-1][1][2],
+            controller._final_job_cancel,
+        )
+
+    def test_cancel_transcription_sets_current_job_cancel_event(self):
+        controller = self._create_controller()
+        current_cancel = controller._final_job_cancel
+        controller._transcription_job_active = True
+        controller._transcription_job_id = 8
+
+        controller.cancel()
+
+        self.assertTrue(current_cancel.is_set())
+        self.assertFalse(controller._transcription_job_active)
+        self.assertEqual(controller._transcription_job_id, 9)
+        self.assertIn("Transcription canceled", controller.ui_controller.statuses)
+
+    def test_canceled_final_worker_exits_without_transcribing_or_error(self):
+        controller = self._create_controller()
+        backend = controller.current_backend
+        cancel_event = threading.Event()
+        cancel_event.set()
+        controller._transcription_job_id = 3
+        controller._transcription_job_active = True
+
+        controller.transcription_runtime.transcribe_audio_file(
+            "queued.wav",
+            3,
+            cancel_event,
+        )
+
+        self.assertEqual(backend.transcribed_paths, [])
+        self.assertFalse(controller._transcription_job_active)
+        self.assertNotIn("Error: Transcription canceled", controller.ui_controller.statuses)
+
+    def test_stale_canceled_worker_does_not_clear_newer_active_job(self):
+        controller = self._create_controller()
+        cancel_event = threading.Event()
+        cancel_event.set()
+        controller._transcription_job_id = 4
+        controller._transcription_job_active = True
+
+        controller.transcription_runtime.transcribe_audio_file(
+            "stale.wav",
+            3,
+            cancel_event,
+        )
+
+        self.assertTrue(controller._transcription_job_active)
+
     def test_stop_recording_continues_when_microphone_signal_is_quiet(self):
         controller = self._create_controller()
         controller.recorder.is_recording = True
@@ -707,6 +815,14 @@ class TestApplicationController(unittest.TestCase):
         self.assertIsNone(controller._pending_audio_path)
         self.assertIsNone(controller._pending_audio_duration)
         self.assertIsNone(controller._pending_file_size)
+
+    def test_transcription_complete_does_not_clear_newer_active_job(self):
+        controller = self._create_controller()
+        controller._transcription_job_active = True
+
+        controller._on_transcription_complete("hello world")
+
+        self.assertTrue(controller._transcription_job_active)
 
     def test_transcription_complete_uses_streaming_fallback_and_copies_clipboard(self):
         controller = self._create_controller()
@@ -833,13 +949,53 @@ class TestApplicationController(unittest.TestCase):
             controller.ui_controller.statuses,
         )
 
+    def test_transcription_complete_keeps_preview_when_final_rewrite_is_too_large(self):
+        self.settings.all_settings["copy_clipboard"] = False
+        controller = self._create_controller()
+        controller._live_typed_text = "preview text that is already in the field"
+        self.text_injector.live_result = types.SimpleNamespace(
+            success=False,
+            method="live_rewrite_limit",
+            error="would backspace 200/200 chars (100%)",
+        )
+
+        controller._on_transcription_complete("rewritten final text")
+
+        self.assertEqual(self.text_injector.injections, [])
+        self.assertEqual(self.pyperclip.copied, [])
+        self.assertEqual(
+            self.text_injector.live_update_options[-1],
+            {
+                "max_backspace_count": config.LIVE_FINAL_REWRITE_MAX_BACKSPACES,
+                "max_backspace_ratio": config.LIVE_FINAL_REWRITE_MAX_BACKSPACE_RATIO,
+            },
+        )
+        self.assertIn("Ready (Preview kept)", controller.ui_controller.statuses)
+
+    def test_transcription_complete_copies_when_live_typing_state_is_uncertain(self):
+        self.settings.all_settings["copy_clipboard"] = False
+        controller = self._create_controller()
+        controller._live_typing_failed = True
+        controller._live_typed_text = "partially typed text"
+
+        controller._on_transcription_complete("final transcript")
+
+        self.assertEqual(self.text_injector.live_updates, [])
+        self.assertEqual(self.text_injector.injections, [])
+        self.assertEqual(self.pyperclip.copied[-1], "final transcript")
+        self.assertIn(
+            "Transcription complete (live typing uncertain; copied)",
+            controller.ui_controller.statuses,
+        )
+
     def test_transcription_complete_skips_injection_when_focus_moved(self):
         controller = self._create_controller()
         controller._text_injection_focus_token = self.text_injector.focus_token
         self.text_injector.focus_active = False
         self.settings.all_settings["copy_clipboard"] = False
 
-        controller._on_transcription_complete("do not type into a different app")
+        with patch.object(config, "TEXT_INJECTION_FOCUS_RECHECK_MS", 0):
+            controller._on_transcription_complete("do not type into a different app")
 
         self.assertEqual(self.text_injector.live_updates, [])
         self.assertEqual(self.text_injector.injections, [])
@@ -849,8 +1005,26 @@ class TestApplicationController(unittest.TestCase):
             controller.ui_controller.statuses,
         )
 
+    def test_transcription_complete_retries_transient_focus_mismatch(self):
+        controller = self._create_controller()
+        controller._text_injection_focus_token = self.text_injector.focus_token
+        controller._live_typed_text = "live preview"
+        self.text_injector.focus_active_sequence = [False, True]
+        self.settings.all_settings["copy_clipboard"] = False
+
+        with patch("services.runtime.transcription.time.sleep", lambda _seconds: None):
+            controller._on_transcription_complete("final transcript")
+
+        self.assertEqual(
+            self.text_injector.live_updates[-1],
+            ("live preview", "final transcript", 0),
+        )
+        self.assertEqual(self.pyperclip.copied, [])
+        self.assertIn("Ready (Pasted)", controller.ui_controller.statuses)
+
     def test_streaming_partial_live_types_into_focused_control(self):
         controller = self._create_controller()
+        controller.streaming_transcriber.is_streaming = True
 
         controller.streaming_runtime.on_partial_transcription("draft text", True)
 
@@ -863,6 +1037,7 @@ class TestApplicationController(unittest.TestCase):
 
     def test_streaming_partial_does_not_type_when_focus_moved(self):
         controller = self._create_controller()
+        controller.streaming_transcriber.is_streaming = True
         controller._text_injection_focus_token = self.text_injector.focus_token
         self.text_injector.focus_active = False
 
@@ -872,8 +1047,20 @@ class TestApplicationController(unittest.TestCase):
         self.assertEqual(controller._live_typed_text, "")
         self.assertEqual(self.text_injector.live_updates, [])
 
+    def test_streaming_partial_drops_late_callback_after_stop_requested(self):
+        controller = self._create_controller()
+        controller.streaming_transcriber.is_streaming = True
+        controller.streaming_transcriber._stop_requested = True
+
+        controller.streaming_runtime.on_partial_transcription("late tail", True)
+
+        self.assertEqual(controller._last_streaming_text, "")
+        self.assertEqual(controller._live_typed_text, "")
+        self.assertEqual(self.text_injector.live_updates, [])
+
     def test_streaming_runtime_preserves_best_text_when_late_update_is_shorter(self):
         controller = self._create_controller()
+        controller.streaming_transcriber.is_streaming = True
 
         controller.streaming_runtime.on_partial_transcription(
             "long streaming text that has the first half",
@@ -915,9 +1102,8 @@ class TestApplicationController(unittest.TestCase):
         self.assertEqual(stop_calls, [True])
         self.assertTrue(controller._silence_auto_stop_triggered)
 
-    def test_gpu_monitor_unloads_loaded_cuda_backend_when_busy(self):
+    def test_gpu_monitor_keeps_loaded_cuda_backend_when_unload_is_disabled(self):
         controller = self._create_controller()
-        local_backend = controller.transcription_backends["local_whisper"]
         status = types.SimpleNamespace(
             available=True,
             memory_free_mb=2000,
@@ -931,8 +1117,48 @@ class TestApplicationController(unittest.TestCase):
         ):
             controller._on_gpu_cooperation_tick()
 
+        self.assertEqual(controller.executor.submissions, [])
+        self.assertEqual(controller._last_gpu_unload_time, 0.0)
+        self.assertGreater(controller._last_gpu_unload_skip_log_time, 0.0)
+
+    def test_gpu_monitor_unloads_loaded_cuda_backend_when_explicitly_enabled(self):
+        controller = self._create_controller()
+        local_backend = controller.transcription_backends["local_whisper"]
+        status = types.SimpleNamespace(
+            available=True,
+            memory_free_mb=2000,
+            busy_reason=lambda: "free memory 2000 MB",
+        )
+
+        with patch.object(config, "GPU_COOPERATIVE_UNLOAD_ON_BUSY", True):
+            with patch.object(
+                self.app_controller_module.gpu_guard,
+                "query_status",
+                return_value=status,
+            ):
+                controller._on_gpu_cooperation_tick()
+
         self.assertEqual(controller.executor.submissions[-1][0], local_backend.cleanup)
         self.assertGreater(controller._last_gpu_unload_time, 0.0)
+
+    def test_gpu_monitor_does_not_unload_during_pending_transcription_job(self):
+        controller = self._create_controller()
+        controller._transcription_job_active = True
+        status = types.SimpleNamespace(
+            available=True,
+            memory_free_mb=2000,
+            busy_reason=lambda: "free memory 2000 MB",
+        )
+
+        with patch.object(
+            self.app_controller_module.gpu_guard,
+            "query_status",
+            return_value=status,
+        ):
+            controller._on_gpu_cooperation_tick()
+
+        self.assertEqual(controller.executor.submissions, [])
+        self.assertEqual(controller._last_gpu_unload_time, 0.0)
 
     def test_gpu_monitor_defers_reload_until_memory_hysteresis_is_clear(self):
         controller = self._create_controller()

@@ -147,6 +147,8 @@ class TextInjector:
         next_text: str,
         *,
         key_delay_ms: int = 0,
+        max_backspace_count: int | None = None,
+        max_backspace_ratio: float | None = None,
     ) -> InjectionResult:
         """Reconcile previously typed streaming text with a newer transcript."""
         previous_text = previous_text or ""
@@ -157,6 +159,23 @@ class TextInjector:
         prefix_len = self._common_prefix_length(previous_text, next_text)
         backspace_count = len(previous_text) - prefix_len
         suffix = next_text[prefix_len:]
+
+        if self._rewrite_exceeds_limit(
+            backspace_count,
+            len(previous_text),
+            max_backspace_count=max_backspace_count,
+            max_backspace_ratio=max_backspace_ratio,
+        ):
+            ratio = backspace_count / max(len(previous_text), 1)
+            return InjectionResult(
+                False,
+                "live_rewrite_limit",
+                (
+                    "would backspace "
+                    f"{backspace_count}/{len(previous_text)} chars "
+                    f"({ratio:.0%})"
+                ),
+            )
 
         if backspace_count:
             result = self._send_backspaces(backspace_count)
@@ -280,6 +299,30 @@ class TextInjector:
         while index < limit and left[index] == right[index]:
             index += 1
         return index
+
+    @staticmethod
+    def _rewrite_exceeds_limit(
+        backspace_count: int,
+        previous_length: int,
+        *,
+        max_backspace_count: int | None,
+        max_backspace_ratio: float | None,
+    ) -> bool:
+        if backspace_count <= 0 or previous_length <= 0:
+            return False
+
+        count_exceeded = (
+            max_backspace_count is not None
+            and backspace_count > max(0, max_backspace_count)
+        )
+        ratio_exceeded = (
+            max_backspace_ratio is not None
+            and backspace_count / previous_length > max(0.0, max_backspace_ratio)
+        )
+
+        if max_backspace_count is not None and max_backspace_ratio is not None:
+            return count_exceeded and ratio_exceeded
+        return count_exceeded or ratio_exceeded
 
 
 text_injector = TextInjector()

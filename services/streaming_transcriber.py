@@ -27,7 +27,7 @@ class StreamingTranscriber:
         backend,
         chunk_duration_sec: float = 3.0,
         transcription_lock: Any | None = None,
-        vad_filter: bool = False,
+        vad_filter: bool = True,
     ):
         """Initialize the streaming transcriber.
 
@@ -124,6 +124,7 @@ class StreamingTranscriber:
 
         logger.info("Stopping streaming transcription...")
         self._stop_requested = True
+        self.callback = None
 
         # Wait for worker thread to finish (with timeout)
         if self.worker_thread and self.worker_thread.is_alive():
@@ -250,12 +251,23 @@ class StreamingTranscriber:
                 if hasattr(self.backend, "ensure_loaded"):
                     self.backend.ensure_loaded()
 
+                vad_params = None
+                if self.vad_filter:
+                    vad_params = dict(
+                        min_silence_duration_ms=config.FASTER_WHISPER_VAD_MIN_SILENCE_MS
+                    )
+
                 segments, info = self.backend.model.transcribe(
                     audio_array,
                     beam_size=config.STREAMING_BEAM_SIZE,
+                    language=config.FASTER_WHISPER_LANGUAGE,
                     condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
                     initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
+                    compression_ratio_threshold=config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
+                    log_prob_threshold=config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
+                    no_speech_threshold=config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
                     vad_filter=self.vad_filter,
+                    vad_parameters=vad_params,
                 )
 
                 # Collect text from all segments
@@ -289,7 +301,12 @@ class StreamingTranscriber:
                 self._best_transcription = full_text
 
             # Emit callback with COMPLETE transcription (is_final=True means replace)
-            if self.callback and full_text:
+            if (
+                self.callback
+                and full_text
+                and self.is_streaming
+                and not self._stop_requested
+            ):
                 self.callback(full_text, True)
 
         except Exception as e:

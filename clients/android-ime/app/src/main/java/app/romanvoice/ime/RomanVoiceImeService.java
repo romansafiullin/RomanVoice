@@ -27,6 +27,10 @@ import java.net.URL;
 public class RomanVoiceImeService extends InputMethodService {
     private static final String TAG = "RomanVoiceIme";
     private static final int SAMPLE_RATE = 16000;
+    private static final long CONNECTING_TIMEOUT_MS = 10000;
+    private static final long STOP_SEND_TIMEOUT_MS = 10000;
+    private static final long FINAL_RESULT_TIMEOUT_MS = 90000;
+    private static final long ERROR_RESET_MS = 3000;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -34,11 +38,15 @@ public class RomanVoiceImeService extends InputMethodService {
     private Button micButton;
     private Button cancelButton;
     private Button nextKeyboardButton;
+    private Runnable connectingTimeoutRunnable;
+    private Runnable stopSendTimeoutRunnable;
+    private Runnable finalResultTimeoutRunnable;
+    private Runnable errorResetRunnable;
 
-    private volatile boolean recording;
-    private AudioRecord audioRecord;
+    private volatile RomanVoiceRecordingPhase phase = RomanVoiceRecordingPhase.IDLE;
+    private volatile AudioRecord audioRecord;
     private Thread audioThread;
-    private RomanVoiceStreamClient client;
+    private volatile RomanVoiceStreamClient client;
     private String lastPartialText = "";
 
     @Override
@@ -101,15 +109,121 @@ public class RomanVoiceImeService extends InputMethodService {
         super.onFinishInput();
     }
 
+    private boolean isRecording() {
+        return phase == RomanVoiceRecordingPhase.RECORDING;
+    }
+
+    private boolean isBusyStartingOrFinishing() {
+        return phase == RomanVoiceRecordingPhase.CONNECTING
+                || phase == RomanVoiceRecordingPhase.FINISHING;
+    }
+
+    private void setPhase(RomanVoiceRecordingPhase nextPhase) {
+        clearPhaseWatchdogs();
+        phase = nextPhase;
+        if (nextPhase == RomanVoiceRecordingPhase.CONNECTING) {
+            scheduleConnectingTimeout();
+        } else if (nextPhase == RomanVoiceRecordingPhase.FINISHING) {
+            scheduleStopSendTimeout();
+            scheduleFinalResultTimeout();
+        } else if (nextPhase == RomanVoiceRecordingPhase.ERROR) {
+            scheduleErrorReset();
+        }
+    }
+
+    private void clearPhaseWatchdogs() {
+        if (connectingTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(connectingTimeoutRunnable);
+            connectingTimeoutRunnable = null;
+        }
+        if (stopSendTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(stopSendTimeoutRunnable);
+            stopSendTimeoutRunnable = null;
+        }
+        if (finalResultTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(finalResultTimeoutRunnable);
+            finalResultTimeoutRunnable = null;
+        }
+        if (errorResetRunnable != null) {
+            mainHandler.removeCallbacks(errorResetRunnable);
+            errorResetRunnable = null;
+        }
+    }
+
+    private void scheduleConnectingTimeout() {
+        connectingTimeoutRunnable = () -> {
+            connectingTimeoutRunnable = null;
+            if (phase == RomanVoiceRecordingPhase.CONNECTING) {
+                handlePhaseTimeout("Connecting timed out - try again");
+            }
+        };
+        mainHandler.postDelayed(connectingTimeoutRunnable, CONNECTING_TIMEOUT_MS);
+    }
+
+    private void scheduleStopSendTimeout() {
+        stopSendTimeoutRunnable = () -> {
+            stopSendTimeoutRunnable = null;
+            if (phase == RomanVoiceRecordingPhase.FINISHING) {
+                handlePhaseTimeout("Finishing timed out - try again");
+            }
+        };
+        mainHandler.postDelayed(stopSendTimeoutRunnable, STOP_SEND_TIMEOUT_MS);
+    }
+
+    private void scheduleFinalResultTimeout() {
+        finalResultTimeoutRunnable = () -> {
+            finalResultTimeoutRunnable = null;
+            if (phase == RomanVoiceRecordingPhase.FINISHING) {
+                handlePhaseTimeout("Finishing timed out - try again");
+            }
+        };
+        mainHandler.postDelayed(finalResultTimeoutRunnable, FINAL_RESULT_TIMEOUT_MS);
+    }
+
+    private void cancelStopSendTimeout() {
+        if (stopSendTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(stopSendTimeoutRunnable);
+            stopSendTimeoutRunnable = null;
+        }
+    }
+
+    private void scheduleErrorReset() {
+        errorResetRunnable = () -> {
+            errorResetRunnable = null;
+            if (phase == RomanVoiceRecordingPhase.ERROR) {
+                setPhase(RomanVoiceRecordingPhase.IDLE);
+                setRecordingControls(false);
+                setStatus("Ready");
+            }
+        };
+        mainHandler.postDelayed(errorResetRunnable, ERROR_RESET_MS);
+    }
+
+    private void handlePhaseTimeout(String message) {
+        setPhase(RomanVoiceRecordingPhase.ERROR);
+        stopAudioRecord();
+        cleanupClient();
+        clearComposingText();
+        setRecordingControls(false);
+        lastPartialText = "";
+        setStatus(message);
+    }
+
     private void toggleRecording() {
-        if (recording) {
+        if (isRecording()) {
             stopRecording(true);
-        } else {
+        } else if (phase == RomanVoiceRecordingPhase.ERROR) {
+            setPhase(RomanVoiceRecordingPhase.IDLE);
+            startRecording();
+        } else if (!isBusyStartingOrFinishing()) {
             startRecording();
         }
     }
 
     private void startRecording() {
+        if (phase != RomanVoiceRecordingPhase.IDLE) {
+            return;
+        }
         if (!hasRecordPermission()) {
             setStatus("Microphone permission needed");
             openSettings();
@@ -118,7 +232,7 @@ public class RomanVoiceImeService extends InputMethodService {
 
         String streamUrl = RomanVoicePreferences.streamUrl(this);
         String token = RomanVoicePreferences.token(this);
-        if (streamUrl == null || streamUrl.trim().isEmpty() || streamUrl.contains("100.x.x.x")) {
+        if (streamUrl == null || streamUrl.trim().isEmpty() || RomanVoicePreferences.isDefaultStreamUrl(streamUrl)) {
             setStatus("Set RomanVoice URL");
             openSettings();
             return;
@@ -129,6 +243,7 @@ public class RomanVoiceImeService extends InputMethodService {
             return;
         }
 
+        setPhase(RomanVoiceRecordingPhase.CONNECTING);
         setStatus("Connecting");
         micButton.setEnabled(false);
         if (cancelButton != null) {
@@ -145,16 +260,23 @@ public class RomanVoiceImeService extends InputMethodService {
                 );
                 streamClient.connect();
                 streamClient.sendStart(SAMPLE_RATE, RomanVoicePreferences.polish(this));
+                if (phase != RomanVoiceRecordingPhase.CONNECTING) {
+                    streamClient.close();
+                    return;
+                }
                 client = streamClient;
                 startAudioPump();
                 mainHandler.post(() -> {
-                    setRecordingControls(true);
-                    setStatus("Listening");
+                    if (phase == RomanVoiceRecordingPhase.RECORDING) {
+                        setRecordingControls(true);
+                        setStatus("Listening");
+                    }
                 });
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice stream connection failed", exception);
                 cleanupClient();
                 mainHandler.post(() -> {
+                    setPhase(RomanVoiceRecordingPhase.ERROR);
                     setRecordingControls(false);
                     setStatus(shortError(exception));
                 });
@@ -180,17 +302,33 @@ public class RomanVoiceImeService extends InputMethodService {
             throw new IOException("Microphone failed to initialize");
         }
 
-        recording = true;
         audioRecord.startRecording();
+        setPhase(RomanVoiceRecordingPhase.RECORDING);
         audioThread = new Thread(() -> {
             byte[] buffer = new byte[bufferSize];
-            while (recording) {
-                int read = audioRecord.read(buffer, 0, buffer.length);
-                if (read > 0 && client != null) {
+            while (phase == RomanVoiceRecordingPhase.RECORDING) {
+                AudioRecord record = audioRecord;
+                if (record == null) {
+                    break;
+                }
+                int read;
+                try {
+                    read = record.read(buffer, 0, buffer.length);
+                } catch (RuntimeException exception) {
+                    Log.w(TAG, "Audio read failed", exception);
+                    mainHandler.post(() -> handleStreamError(shortError(exception)));
+                    break;
+                }
+                RomanVoiceStreamClient streamClient = client;
+                if (read > 0 && streamClient != null) {
                     try {
-                        client.sendAudio(buffer, read);
+                        streamClient.sendAudio(buffer, read);
                     } catch (IOException exception) {
                         Log.w(TAG, "Failed to send audio chunk", exception);
+                        mainHandler.post(() -> handleStreamError(shortError(exception)));
+                        break;
+                    } catch (RuntimeException exception) {
+                        Log.w(TAG, "Audio pump failed", exception);
                         mainHandler.post(() -> handleStreamError(shortError(exception)));
                         break;
                     }
@@ -201,11 +339,11 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void stopRecording(boolean requestFinal) {
-        boolean wasRecording = recording;
-        recording = false;
+        boolean wasRecording = isRecording();
         stopAudioRecord();
 
         if (requestFinal && client != null) {
+            setPhase(RomanVoiceRecordingPhase.FINISHING);
             setStatus("Finishing");
             micButton.setEnabled(false);
             if (cancelButton != null) {
@@ -213,12 +351,19 @@ public class RomanVoiceImeService extends InputMethodService {
             }
             new Thread(() -> {
                 try {
-                    client.sendStop();
+                    RomanVoiceStreamClient streamClient = client;
+                    if (streamClient != null) {
+                        streamClient.sendStop();
+                    }
+                    mainHandler.post(this::cancelStopSendTimeout);
                 } catch (IOException exception) {
+                    mainHandler.post(() -> handleStreamError(shortError(exception)));
+                } catch (RuntimeException exception) {
                     mainHandler.post(() -> handleStreamError(shortError(exception)));
                 }
             }, "RomanVoiceStop").start();
         } else {
+            setPhase(RomanVoiceRecordingPhase.IDLE);
             cleanupClient();
             if (wasRecording) {
                 mainHandler.post(() -> {
@@ -231,8 +376,8 @@ public class RomanVoiceImeService extends InputMethodService {
 
     private void cancelRecording() {
         boolean hadClient = client != null;
-        boolean wasRecording = recording;
-        recording = false;
+        boolean wasRecording = isRecording();
+        setPhase(RomanVoiceRecordingPhase.IDLE);
         stopAudioRecord();
         clearComposingText();
         cleanupClient();
@@ -254,6 +399,9 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void handlePartial(String text) {
+        if (phase != RomanVoiceRecordingPhase.RECORDING) {
+            return;
+        }
         lastPartialText = text == null ? "" : text;
         InputConnection connection = getCurrentInputConnection();
         if (connection != null) {
@@ -263,7 +411,11 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void handleFinal(String text) {
+        if (phase != RomanVoiceRecordingPhase.FINISHING) {
+            return;
+        }
         stopAudioRecord();
+        setPhase(RomanVoiceRecordingPhase.IDLE);
         String finalText = text == null ? "" : text;
         InputConnection connection = getCurrentInputConnection();
         if (connection != null) {
@@ -280,7 +432,7 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void handleStreamError(String message) {
-        recording = false;
+        setPhase(RomanVoiceRecordingPhase.ERROR);
         stopAudioRecord();
         cleanupClient();
         clearComposingText();
@@ -298,6 +450,11 @@ public class RomanVoiceImeService extends InputMethodService {
     }
 
     private void pingService() {
+        if (phase == RomanVoiceRecordingPhase.CONNECTING
+                || phase == RomanVoiceRecordingPhase.RECORDING
+                || phase == RomanVoiceRecordingPhase.FINISHING) {
+            return;
+        }
         setStatus("Checking RomanVoice");
         new Thread(() -> {
             String message;
@@ -313,7 +470,7 @@ public class RomanVoiceImeService extends InputMethodService {
                 connection.disconnect();
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice health check failed", exception);
-                message = "RomanVoice offline";
+                message = "RomanVoice slow - tap mic to try";
             }
             String finalMessage = message;
             mainHandler.post(() -> setStatus(finalMessage));

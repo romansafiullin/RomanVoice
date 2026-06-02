@@ -10,6 +10,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -19,6 +20,10 @@ import java.security.SecureRandom;
 import javax.net.ssl.SSLSocketFactory;
 
 final class RomanVoiceStreamClient implements Closeable {
+    private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final long PING_INTERVAL_MS = 5000;
+    private static final long PONG_TIMEOUT_MS = 12000;
+
     interface Listener {
         void onReady();
 
@@ -40,7 +45,9 @@ final class RomanVoiceStreamClient implements Closeable {
     private InputStream input;
     private OutputStream output;
     private Thread readerThread;
+    private Thread keepAliveThread;
     private volatile boolean closed;
+    private volatile long outstandingPingAtMs;
 
     RomanVoiceStreamClient(String streamUrl, String token, Listener listener) {
         this.uri = URI.create(streamUrl);
@@ -59,12 +66,14 @@ final class RomanVoiceStreamClient implements Closeable {
             port = "wss".equalsIgnoreCase(scheme) ? 443 : 80;
         }
 
-        if ("wss".equalsIgnoreCase(scheme)) {
-            socket = SSLSocketFactory.getDefault().createSocket(uri.getHost(), port);
-        } else {
-            socket = new Socket(uri.getHost(), port);
+        socket = "wss".equalsIgnoreCase(scheme)
+                ? SSLSocketFactory.getDefault().createSocket()
+                : new Socket();
+        socket.connect(new InetSocketAddress(uri.getHost(), port), CONNECT_TIMEOUT_MS);
+        socket.setSoTimeout(CONNECT_TIMEOUT_MS);
+        if ("wss".equalsIgnoreCase(scheme) && socket instanceof javax.net.ssl.SSLSocket) {
+            ((javax.net.ssl.SSLSocket) socket).startHandshake();
         }
-        socket.setSoTimeout(15000);
         input = socket.getInputStream();
         output = socket.getOutputStream();
 
@@ -96,9 +105,12 @@ final class RomanVoiceStreamClient implements Closeable {
             String firstLine = response.split("\r\n", 2)[0];
             throw new IOException("RomanVoice refused stream: " + firstLine);
         }
+        socket.setSoTimeout(0);
 
         readerThread = new Thread(this::readLoop, "RomanVoiceStreamReader");
         readerThread.start();
+        keepAliveThread = new Thread(this::keepAliveLoop, "RomanVoiceStreamKeepAlive");
+        keepAliveThread.start();
     }
 
     void sendStart(int sampleRate, String polish) throws IOException {
@@ -150,6 +162,9 @@ final class RomanVoiceStreamClient implements Closeable {
             }
         } catch (IOException ignored) {
         }
+        if (keepAliveThread != null) {
+            keepAliveThread.interrupt();
+        }
     }
 
     private void sendText(String text) throws IOException {
@@ -196,6 +211,10 @@ final class RomanVoiceStreamClient implements Closeable {
                     sendFrame(0xA, frame.payload);
                     continue;
                 }
+                if (frame.opcode == 0xA) {
+                    outstandingPingAtMs = 0;
+                    continue;
+                }
                 if (frame.opcode == 0x1) {
                     handleText(new String(frame.payload, StandardCharsets.UTF_8));
                 }
@@ -203,6 +222,33 @@ final class RomanVoiceStreamClient implements Closeable {
         } catch (Exception exception) {
             if (!closed) {
                 listener.onError(exception.getMessage());
+            }
+        }
+    }
+
+    private void keepAliveLoop() {
+        try {
+            while (!closed) {
+                Thread.sleep(PING_INTERVAL_MS);
+                if (closed) {
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                long sentAt = outstandingPingAtMs;
+                if (sentAt > 0 && now - sentAt > PONG_TIMEOUT_MS) {
+                    listener.onError("RomanVoice stream ping timed out");
+                    close();
+                    return;
+                }
+                outstandingPingAtMs = now;
+                sendFrame(0x9, new byte[]{});
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (Exception exception) {
+            if (!closed) {
+                listener.onError(exception.getMessage());
+                close();
             }
         }
     }

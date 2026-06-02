@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import time
+from threading import Event
 from dataclasses import dataclass
 from typing import Optional
 
@@ -180,8 +181,13 @@ class GPUGuard:
         status = self.query_status()
         return bool(status.busy_reason())
 
-    def wait_for_cuda_budget(self, reason: str, max_wait_ms: int) -> bool:
-        """Wait until CUDA appears safe to use, or return False on timeout."""
+    def wait_for_cuda_budget(
+        self,
+        reason: str,
+        max_wait_ms: int,
+        cancel_event: Event | None = None,
+    ) -> bool:
+        """Wait until CUDA appears safe to use, or return False on timeout/cancel."""
         if not config.GPU_COOPERATIVE_MODE:
             return True
 
@@ -189,6 +195,10 @@ class GPUGuard:
         last_logged_reason = None
 
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Stopped waiting for %s; transcription was canceled", reason)
+                return False
+
             status = self.query_status()
             busy_reason = status.busy_reason()
             if not busy_reason:
@@ -213,7 +223,15 @@ class GPUGuard:
                 return False
 
             sleep_sec = min(config.GPU_BUSY_RECHECK_MS / 1000, max(0.1, deadline - time.time()))
-            time.sleep(sleep_sec)
+            if cancel_event is not None:
+                if cancel_event.wait(sleep_sec):
+                    logger.info(
+                        "Stopped waiting for %s; transcription was canceled",
+                        reason,
+                    )
+                    return False
+            else:
+                time.sleep(sleep_sec)
 
 
 gpu_guard = GPUGuard()
