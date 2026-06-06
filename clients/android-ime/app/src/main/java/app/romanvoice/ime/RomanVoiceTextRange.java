@@ -29,14 +29,17 @@ final class RomanVoiceTextRange {
         }
 
         int firstMatch = current.indexOf(last);
-        if (firstMatch < 0) {
-            return null;
+        if (firstMatch >= 0) {
+            int secondMatch = current.indexOf(last, firstMatch + last.length());
+            if (secondMatch < 0) {
+                return new int[]{firstMatch, firstMatch + last.length()};
+            }
         }
-        int secondMatch = current.indexOf(last, firstMatch + last.length());
-        if (secondMatch >= 0) {
-            return null;
+
+        if (end > start && end <= current.length() && end - start == last.length()) {
+            return new int[]{start, end};
         }
-        return new int[]{firstMatch, firstMatch + last.length()};
+        return null;
     }
 
     private static int clamp(int value, int min, int max) {

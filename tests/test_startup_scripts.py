@@ -13,6 +13,19 @@ def test_background_launcher_exposes_service_for_phone_clients():
     assert "'0.0.0.0'" in script
 
 
+def test_background_launcher_checks_service_port_owner_before_starting_duplicate():
+    script = (PROJECT_ROOT / "scripts" / "ensure-romanvoice-running.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-NetTCPConnection -LocalPort $Port -State Listen" in script
+    assert "Test-PreferredRomanVoiceProcess" in script
+    assert ".venv\\Scripts\\pythonw.exe" in script
+    assert "$Process.ParentProcessId" in script
+    assert "owned by non-preferred" in script
+    assert "expected $venvPythonw" in script
+
+
 def test_cmd_background_launchers_expose_service_for_phone_clients():
     for launcher in ("romanvoice.cmd", "romanvoice-background.cmd"):
         script = (PROJECT_ROOT / "scripts" / launcher).read_text(encoding="utf-8")

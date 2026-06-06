@@ -30,3 +30,24 @@ def test_local_backend_uses_robust_decode_options():
     assert kwargs["no_speech_threshold"] == 0.6
     assert kwargs["vad_filter"] is True
     assert kwargs["vad_parameters"] == {"min_silence_duration_ms": 400}
+
+
+def test_local_backend_accepts_decode_option_overrides():
+    backend = LocalWhisperBackend(model_name="base", autoload=False)
+    backend.model = _Model()
+
+    assert backend.transcribe(
+        "sample.wav",
+        decode_options={
+            "condition_on_previous_text": True,
+            "initial_prompt": "legacy dictation prompt",
+            "vad_filter": False,
+        },
+    ) == "Hello."
+
+    kwargs = backend.model.seen_kwargs
+    assert kwargs["language"] == "en"
+    assert kwargs["condition_on_previous_text"] is True
+    assert kwargs["initial_prompt"] == "legacy dictation prompt"
+    assert kwargs["vad_filter"] is False
+    assert "vad_parameters" not in kwargs

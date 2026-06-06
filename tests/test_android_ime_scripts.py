@@ -38,6 +38,11 @@ def test_phone_installer_defaults_to_floating_mic_workflow():
     assert script.index(preinstall_stop) < script.rindex("Install-DebugApk")
     assert "ime set app.romanvoice.ime/.RomanVoiceImeService" in script
     assert "if ($SetRomanVoiceKeyboard)" in script
+    assert "[switch]$PreferLan" in script
+    assert "function Resolve-TailscaleExe" in script
+    assert "function Resolve-TailscaleIp" in script
+    assert "Tailscale\\tailscale.exe" in script
+    assert "ws://$Address`:8799/v1/transcribe/stream" in script
 
 
 def test_phone_tile_health_checker_covers_host_heartbeat_and_accessibility_state():
@@ -117,6 +122,9 @@ def test_android_manifest_declares_quick_settings_tile_service():
     assert 'tile.setContentDescription("RomanVoice ready. Tap to start dictation.")' in tile_source
     assert 'tile.setContentDescription("RomanVoice recording. Tap to stop dictation.")' in tile_source
     assert 'tile.setSubtitle("Unlock first")' in tile_source
+    assert 'tile.setSubtitle("Enable Floating Mic")' in tile_source
+    assert 'tile.setContentDescription("Enable RomanVoice Floating Mic before dictating.")' in tile_source
+    assert 'tile.setState(Tile.STATE_INACTIVE)' in tile_source
     assert "RomanVoicePhoneHeartbeat.reportAsync" in tile_source
     assert "floating_service_unavailable" in tile_source
     assert "GLOBAL_ACTION_BACK" not in tile_source
@@ -164,8 +172,8 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert 'micButton.setContentDescription("Start RomanVoice dictation")' in source
     assert 'micButton.setText(isRecording ? "Stop" : "Start")' in source
     assert "overlayView.setVisibility(View.GONE)" in source
-    assert "statusView.setVisibility(View.VISIBLE)" in source
-    assert "statusView.setOnClickListener(view -> toggleRecording())" in source
+    assert "private TextView statusView" not in source
+    assert "statusView.setVisibility(View.VISIBLE)" not in source
     assert "overlayView.setOnClickListener(view -> toggleRecording())" in source
     assert "RESTART_WINDOW_VISIBLE_MS = 8000" in source
     assert "cancelIdleOverlayHide()" in source
@@ -175,6 +183,10 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "setPillState(PILL_COLOR_RECORDED, true)" in source
     assert "showIdleNotice(\"Tap a text field first\")" in source
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
+    assert 'CONNECTION_FAILED_NOTICE = "No PC connection - check Wi-Fi/VPN"' in source
+    assert 'handlePhaseTimeout(CONNECTION_FAILED_NOTICE, "connection_timeout")' in source
+    assert "showFailureNotice(CONNECTION_FAILED_NOTICE)" in source
+    assert "Toast.makeText(this, text, Toast.LENGTH_LONG).show()" in source
     assert "PHONE_HEARTBEAT_INTERVAL_MS" in source
     assert "startPhoneHeartbeat()" in source
     assert "reportPhoneHeartbeat(\"destroyed\", false)" in source

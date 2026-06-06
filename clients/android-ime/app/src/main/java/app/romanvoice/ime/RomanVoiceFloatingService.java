@@ -24,7 +24,6 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.IOException;
@@ -48,6 +47,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final long FINAL_RESULT_TIMEOUT_MS = 90000;
     private static final long ERROR_RESET_MS = 3000;
     private static final long TILE_TOGGLE_DEBOUNCE_MS = 750;
+    private static final String CONNECTION_FAILED_NOTICE = "No PC connection - check Wi-Fi/VPN";
 
     private static volatile RomanVoiceFloatingService activeService;
 
@@ -58,7 +58,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private LinearLayout overlayView;
     private Button micButton;
     private Button cancelButton;
-    private TextView statusView;
     private Runnable hideIdleOverlayRunnable;
     private Runnable tileFocusRetryRunnable;
     private Runnable phoneHeartbeatRunnable;
@@ -132,8 +131,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (phase == RomanVoiceRecordingPhase.IDLE
                 && overlayView != null
-                && overlayView.getVisibility() == View.VISIBLE
-                && statusView != null) {
+                && overlayView.getVisibility() == View.VISIBLE) {
             AccessibilityNodeInfo node = findFocusedEditableNode();
             setStatus(node == null ? "Tap a text field" : "Ready");
             recycleNode(node);
@@ -192,19 +190,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         cancelButton.setVisibility(View.GONE);
         cancelButton.setOnClickListener(view -> cancelRecording());
         overlayView.addView(cancelButton, new LinearLayout.LayoutParams(dp(46), dp(46)));
-
-        statusView = new TextView(this);
-        statusView.setTextColor(Color.WHITE);
-        statusView.setTextSize(12f);
-        statusView.setSingleLine(true);
-        statusView.setPadding(dp(8), 0, dp(2), 0);
-        statusView.setVisibility(View.VISIBLE);
-        statusView.setOnClickListener(view -> toggleRecording());
-        statusView.setOnLongClickListener(view -> {
-            cancelRecording();
-            return true;
-        });
-        overlayView.addView(statusView, new LinearLayout.LayoutParams(dp(116), dp(46)));
 
         overlayView.setOnClickListener(view -> toggleRecording());
         overlayView.setOnLongClickListener(view -> {
@@ -280,7 +265,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         connectingTimeoutRunnable = () -> {
             connectingTimeoutRunnable = null;
             if (phase == RomanVoiceRecordingPhase.CONNECTING) {
-                handlePhaseTimeout("Connecting timed out - try again", "connection_timeout");
+                handlePhaseTimeout(CONNECTION_FAILED_NOTICE, "connection_timeout");
             }
         };
         mainHandler.postDelayed(connectingTimeoutRunnable, CONNECTING_TIMEOUT_MS);
@@ -331,8 +316,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         stopAudioRecord();
         cleanupClient();
         setRecordingControls(false);
-        setStatus(message);
-        setPillColor(PILL_COLOR_ERROR);
+        showFailureNotice(message);
         notifyTileStateChanged();
         reportPhoneHeartbeat(event);
     }
@@ -442,8 +426,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 mainHandler.post(() -> {
                     setPhase(RomanVoiceRecordingPhase.ERROR);
                     setRecordingControls(false);
-                    setStatus(shortError(exception));
-                    setPillColor(PILL_COLOR_ERROR);
+                    showFailureNotice(CONNECTION_FAILED_NOTICE);
                     notifyTileStateChanged();
                     reportPhoneHeartbeat("connection_failed");
                 });
@@ -635,8 +618,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         stopAudioRecord();
         cleanupClient();
         setRecordingControls(false);
-        setStatus(message == null || message.isEmpty() ? "Offline" : message);
-        setPillColor(PILL_COLOR_ERROR);
+        showFailureNotice(
+                message == null || message.isEmpty() ? CONNECTION_FAILED_NOTICE : message
+        );
         resetLiveDictationState();
         notifyTileStateChanged();
         reportPhoneHeartbeat("stream_error");
@@ -873,8 +857,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void setStatus(String text) {
-        if (statusView != null) {
-            statusView.setText(text);
+        if (micButton != null && text != null && !text.trim().isEmpty()) {
+            micButton.setContentDescription(text);
         }
     }
 
@@ -882,6 +866,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         setStatus(text);
         setPillColor(PILL_COLOR_ERROR);
         Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+        if (overlayView == null) {
+            return;
+        }
+        overlayView.setVisibility(View.VISIBLE);
+        scheduleIdleOverlayHide(IDLE_NOTICE_VISIBLE_MS);
+    }
+
+    private void showFailureNotice(String text) {
+        setStatus(text);
+        setPillColor(PILL_COLOR_ERROR);
+        Toast.makeText(this, text, Toast.LENGTH_LONG).show();
         if (overlayView == null) {
             return;
         }
@@ -912,9 +907,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void setOverlayClickTargetsEnabled(boolean enabled) {
         if (micButton != null) {
             micButton.setEnabled(enabled);
-        }
-        if (statusView != null) {
-            statusView.setEnabled(enabled);
         }
         if (overlayView != null) {
             overlayView.setEnabled(enabled);

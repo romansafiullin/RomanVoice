@@ -92,8 +92,11 @@ For command-line install after USB debugging is enabled:
 ```
 
 The install script reads `%APPDATA%\RomanVoice\service_token.txt`, installs the
-debug APK, grants microphone permission, and preloads the IME settings with this
-PC's LAN URL. By default it preserves or restores the normal keyboard, preferring
+debug APK, grants microphone permission, and preloads the IME settings. When this
+PC is logged into Tailscale, it uses the PC's `100.x` Tailscale address so the
+phone can keep reaching RomanVoice on 5G. If Tailscale is unavailable, it falls
+back to this PC's LAN URL; pass `-PreferLan` when you intentionally want the
+LAN-only URL. By default it preserves or restores the normal keyboard, preferring
 SwiftKey when RomanVoice was already active, and enables/verifies the floating
 mic service through ADB for development testing. Pass `-SetRomanVoiceKeyboard`
 when you want the full RomanVoice keyboard selected instead.

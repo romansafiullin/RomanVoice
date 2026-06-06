@@ -53,6 +53,26 @@ def test_text_range_helper_does_not_relocate_short_common_text(tmp_path):
                             "dictated words"
                         )
                     );
+                    assertRange(
+                        RomanVoiceTextRange.findLiveDictationRange(
+                            "dictated words and dictated words",
+                            19,
+                            33,
+                            "dictated words"
+                        ),
+                        19,
+                        33
+                    );
+                    assertRange(
+                        RomanVoiceTextRange.findLiveDictationRange(
+                            "prefix changed phrase suffix",
+                            7,
+                            21,
+                            "dictated words"
+                        ),
+                        7,
+                        21
+                    );
                 }
 
                 private static void assertRange(int[] range, int start, int end) {

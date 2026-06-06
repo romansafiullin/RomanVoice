@@ -24,11 +24,13 @@ class FakeBackend:
     def __init__(self):
         self.seen_path = None
         self.seen_bytes = None
+        self.seen_decode_options = None
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, *, decode_options=None) -> str:
         path = Path(audio_path)
         self.seen_path = path
         self.seen_bytes = path.read_bytes()
+        self.seen_decode_options = dict(decode_options or {})
         assert path.exists()
         assert path.suffix == ".webm"
         return "add clean the window"
@@ -64,13 +66,15 @@ class FakeStreamingBackend:
         self.final_text = final_text
         self.final_seen_path = None
         self.final_wave_info = None
+        self.final_decode_options = None
 
     def ensure_loaded(self):
         return None
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, *, decode_options=None) -> str:
         path = Path(audio_path)
         self.final_seen_path = path
+        self.final_decode_options = dict(decode_options or {})
         assert path.exists()
         assert path.suffix == ".wav"
         with wave.open(str(path), "rb") as wav_file:
@@ -94,13 +98,17 @@ class FakeChunkingBackend:
         self.text = text
         self.single_calls = 0
         self.chunk_files = []
+        self.seen_decode_options = None
+        self.seen_chunk_decode_options = None
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, *, decode_options=None) -> str:
         self.single_calls += 1
+        self.seen_decode_options = dict(decode_options or {})
         return "single pass transcript"
 
-    def transcribe_chunks(self, chunk_files):
+    def transcribe_chunks(self, chunk_files, *, decode_options=None):
         self.chunk_files = list(chunk_files)
+        self.seen_chunk_decode_options = dict(decode_options or {})
         for chunk_file in self.chunk_files:
             with wave.open(str(chunk_file), "rb") as wav_file:
                 assert wav_file.getnframes() > 0
@@ -277,8 +285,29 @@ def test_service_transcribes_raw_audio_with_bearer_token():
     assert payload["backend"] == "fake-whisper"
     assert payload["device_info"] == "test-device"
     assert payload["bytes_received"] == len(b"fake-audio")
+    assert payload["decode_profile"] == config.SERVICE_HTTP_DECODE_PROFILE
     assert payload["used_polish"] is False
     assert controller.backend.seen_bytes == b"fake-audio"
+    assert controller.backend.seen_decode_options["language"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_LANGUAGE
+    )
+    assert controller.backend.seen_decode_options["condition_on_previous_text"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+    )
+    assert controller.backend.seen_decode_options["initial_prompt"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_INITIAL_PROMPT
+    )
+    assert controller.backend.seen_decode_options["vad_filter"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED
+    )
+    if config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED:
+        assert controller.backend.seen_decode_options["vad_parameters"] == {
+            "min_silence_duration_ms": (
+                config.SERVICE_HTTP_FASTER_WHISPER_VAD_MIN_SILENCE_MS
+            )
+        }
+    else:
+        assert "vad_parameters" not in controller.backend.seen_decode_options
     assert not controller.backend.seen_path.exists()
 
 
@@ -312,6 +341,12 @@ def test_service_chunks_long_http_audio_and_saves_recovery_copy(tmp_path, monkey
     assert (tmp_path / "romanvoice_service_upload_last.wav").exists()
     assert backend.single_calls == 0
     assert backend.chunk_files
+    assert backend.seen_chunk_decode_options["condition_on_previous_text"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+    )
+    assert backend.seen_chunk_decode_options["initial_prompt"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_INITIAL_PROMPT
+    )
 
 
 def test_service_keeps_bounded_timestamped_http_upload_diagnostics(tmp_path, monkeypatch):
@@ -366,10 +401,11 @@ def test_service_tracks_phone_floating_heartbeat_status():
     controller = FakeController()
     service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
     service.start()
+    base_url = service.base_url
     try:
-        initial = get_json(f"{service.base_url}/v1/phone/status", token="secret")
+        initial = get_json(f"{base_url}/v1/phone/status", token="secret")
         heartbeat = post_json(
-            f"{service.base_url}/v1/phone/heartbeat",
+            f"{base_url}/v1/phone/heartbeat",
             {
                 "surface": "floating",
                 "event": "heartbeat",
@@ -380,7 +416,7 @@ def test_service_tracks_phone_floating_heartbeat_status():
             token="secret",
         )
         inactive = post_json(
-            f"{service.base_url}/v1/phone/heartbeat",
+            f"{base_url}/v1/phone/heartbeat",
             {
                 "surface": "tile",
                 "event": "floating_service_unavailable",
@@ -390,7 +426,7 @@ def test_service_tracks_phone_floating_heartbeat_status():
             },
             token="secret",
         )
-        detailed = get_json(f"{service.base_url}/v1/health", token="secret")
+        detailed = get_json(f"{base_url}/v1/health", token="secret")
     finally:
         service.stop()
 
@@ -403,6 +439,21 @@ def test_service_tracks_phone_floating_heartbeat_status():
     assert inactive["phone"]["ok"] is False
     assert inactive["phone"]["event"] == "floating_service_unavailable"
     assert detailed["phone"]["status"] == "inactive"
+    assert detailed["runtime"]["pid"] > 0
+    assert detailed["runtime"]["executable"]
+    assert detailed["runtime"]["cwd"]
+    assert detailed["runtime"]["service_port"] == service.port
+    assert detailed["runtime"]["base_url"] == base_url
+    assert detailed["http_decode_profile"]["name"] == config.SERVICE_HTTP_DECODE_PROFILE
+    assert detailed["http_decode_profile"]["language"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_LANGUAGE
+    )
+    assert detailed["http_decode_profile"]["condition_on_previous_text"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+    )
+    assert detailed["http_decode_profile"]["vad_filter"] == (
+        config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED
+    )
 
 
 def test_service_rejects_unauthenticated_phone_status_and_heartbeat():
@@ -475,13 +526,13 @@ def test_service_streams_pcm16_audio_with_bearer_token(tmp_path, monkeypatch):
 
     final = next(message for message in messages if message["type"] == "final")
     assert final["ok"] is True
-    assert final["text"] == "final phone words"
-    assert final["raw_text"] == "final phone words"
+    assert final["text"] == "streamed words"
+    assert final["raw_text"] == "streamed words"
     assert final["backend"] == "fake-streaming-whisper"
     assert final["device_info"] == "stream-device"
     assert final["bytes_received"] == 3200
     assert final["sample_rate"] == 16000
-    assert final["final_source"] == "final_wav"
+    assert final["final_source"] == "streaming_preview"
     assert final["audio_duration_seconds"] == 0.1
     assert final["audio_peak"] == 1
     assert final["audio_rms"] == 1.0
@@ -490,13 +541,8 @@ def test_service_streams_pcm16_audio_with_bearer_token(tmp_path, monkeypatch):
     assert final["used_polish"] is False
     assert backend.model.seen_samples == 1600
     assert backend.model.seen_kwargs["vad_filter"] is True
-    assert controller.transcription_runtime.select_count == 1
-    assert backend.final_wave_info == {
-        "channels": 1,
-        "sample_width": 2,
-        "frame_rate": 16000,
-        "frames": 1600,
-    }
+    assert controller.transcription_runtime.select_count == 0
+    assert backend.final_seen_path is None
 
 
 def test_service_streaming_returns_empty_for_all_zero_audio(tmp_path, monkeypatch):
@@ -540,6 +586,7 @@ def test_service_streaming_returns_empty_for_all_zero_audio(tmp_path, monkeypatc
 
 def test_service_streaming_falls_back_to_preview_when_final_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "PHONE_STREAM_FINAL_PASS_ENABLED", True)
     backend = FakeStreamingBackend(final_text="")
     controller = FakeController(backend)
     service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
@@ -579,6 +626,7 @@ def test_service_streaming_prefers_long_preview_when_final_is_truncated(
     monkeypatch,
 ):
     monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "PHONE_STREAM_FINAL_PASS_ENABLED", True)
     rolling_text = "rolling phone words " * 45
     final_text = "late phone words " * 12
     backend = FakeStreamingBackend(final_text=final_text, rolling_text=rolling_text)
@@ -621,6 +669,7 @@ def test_service_streaming_prefers_long_preview_when_final_drops_prefix(
     monkeypatch,
 ):
     monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "PHONE_STREAM_FINAL_PASS_ENABLED", True)
     rolling_text = (
         "Here are a couple of thoughts on labeling and new task creation. For example, "
         "routine, colon, morning lunch is repeated twice. Not quite clear what it is. "

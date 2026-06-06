@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import secrets
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -55,6 +57,29 @@ def audio_suffix_for_content_type(content_type: str | None) -> str:
         if normalized == prefix:
             return suffix
     return ".webm"
+
+
+def http_batch_decode_options() -> dict[str, Any]:
+    """Decode profile used by PA/browser HTTP uploads."""
+    options: dict[str, Any] = {
+        "beam_size": config.SERVICE_HTTP_FASTER_WHISPER_BEAM_SIZE,
+        "language": config.SERVICE_HTTP_FASTER_WHISPER_LANGUAGE,
+        "condition_on_previous_text": (
+            config.SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+        ),
+        "initial_prompt": config.SERVICE_HTTP_FASTER_WHISPER_INITIAL_PROMPT,
+        "compression_ratio_threshold": config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
+        "log_prob_threshold": config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
+        "no_speech_threshold": config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
+        "vad_filter": config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED,
+    }
+    if config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED:
+        options["vad_parameters"] = {
+            "min_silence_duration_ms": (
+                config.SERVICE_HTTP_FASTER_WHISPER_VAD_MIN_SILENCE_MS
+            )
+        }
+    return options
 
 
 class RomanVoiceDictationService:
@@ -453,14 +478,23 @@ class RomanVoiceDictationService:
             lock = threading.RLock()
 
         preview = self._audio_file_preview(audio_path)
+        decode_options = http_batch_decode_options()
         with lock:
             backend = self.controller.transcription_runtime._select_backend_for_transcription()
             self.controller._active_transcription_backend = backend
             try:
                 if self._should_chunk_http_audio(preview):
-                    raw_text, final_source, chunk_count = self._transcribe_http_chunks(backend, audio_path)
+                    raw_text, final_source, chunk_count = self._transcribe_http_chunks(
+                        backend,
+                        audio_path,
+                        decode_options=decode_options,
+                    )
                 else:
-                    raw_text = backend.transcribe(str(audio_path)).strip()
+                    raw_text = self._transcribe_with_decode_options(
+                        backend,
+                        str(audio_path),
+                        decode_options,
+                    ).strip()
                     final_source = "http_final_file"
                     chunk_count = 1
                 polished = self._maybe_polish(raw_text, polish_mode)
@@ -489,6 +523,7 @@ class RomanVoiceDictationService:
                     "content_type": content_type or "application/octet-stream",
                     "final_source": final_source,
                     "chunk_count": chunk_count,
+                    "decode_profile": config.SERVICE_HTTP_DECODE_PROFILE,
                     "debug_audio_path": debug_audio_path,
                     **integrity,
                     "used_polish": polished["used_polish"],
@@ -518,20 +553,56 @@ class RomanVoiceDictationService:
         duration = float(preview.get("audio_duration_seconds") or 0.0)
         return duration >= float(config.SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS)
 
-    def _transcribe_http_chunks(self, backend: Any, audio_path: Path) -> tuple[str, str, int]:
+    def _transcribe_http_chunks(
+        self,
+        backend: Any,
+        audio_path: Path,
+        *,
+        decode_options: dict[str, Any],
+    ) -> tuple[str, str, int]:
         from services.audio_processor import audio_processor
 
         chunk_files = audio_processor.split_audio_file(str(audio_path))
         try:
             if hasattr(backend, "transcribe_chunks"):
-                text = str(backend.transcribe_chunks(chunk_files) or "").strip()
+                try:
+                    text = str(
+                        backend.transcribe_chunks(
+                            chunk_files,
+                            decode_options=decode_options,
+                        )
+                        or ""
+                    ).strip()
+                except TypeError:
+                    text = str(backend.transcribe_chunks(chunk_files) or "").strip()
             else:
-                parts = [str(backend.transcribe(chunk_file) or "").strip() for chunk_file in chunk_files]
+                parts = [
+                    str(
+                        self._transcribe_with_decode_options(
+                            backend,
+                            chunk_file,
+                            decode_options,
+                        )
+                        or ""
+                    ).strip()
+                    for chunk_file in chunk_files
+                ]
                 text = audio_processor.combine_transcriptions(parts)
             logger.info("HTTP long-form transcription used %s chunk(s)", len(chunk_files))
             return text, "http_chunked_wav", len(chunk_files)
         finally:
             audio_processor.cleanup_temp_files()
+
+    @staticmethod
+    def _transcribe_with_decode_options(
+        backend: Any,
+        audio_path: str,
+        decode_options: dict[str, Any],
+    ) -> str:
+        try:
+            return backend.transcribe(audio_path, decode_options=decode_options)
+        except TypeError:
+            return backend.transcribe(audio_path)
 
     def _http_transcript_integrity(self, text: str, preview: dict[str, Any]) -> dict[str, Any]:
         duration = float(preview.get("audio_duration_seconds") or 0.0)
@@ -620,7 +691,14 @@ class RomanVoiceDictationService:
             metrics = self._pcm16_metrics(audio_bytes, sample_rate)
             debug_audio_path = self._save_last_stream_wav(audio_bytes, sample_rate)
 
-            if metrics["audio_peak"] > 0:
+            should_run_final_pass = (
+                metrics["audio_peak"] > 0
+                and (
+                    config.PHONE_STREAM_FINAL_PASS_ENABLED
+                    or not rolling_text
+                )
+            )
+            if should_run_final_pass:
                 temp_wav_path: Path | None = None
                 try:
                     temp_wav_path = self._write_temp_pcm16_wav(audio_bytes, sample_rate)
@@ -683,12 +761,20 @@ class RomanVoiceDictationService:
                                 temp_wav_path,
                             )
             else:
-                logger.info(
-                    "Phone stream contained no non-zero PCM samples "
-                    "(bytes=%s, duration=%.3fs)",
-                    total_audio_bytes,
-                    metrics["audio_duration_seconds"],
-                )
+                if metrics["audio_peak"] > 0:
+                    logger.info(
+                        "Using rolling phone stream transcript without final WAV pass "
+                        "(chars=%s, duration=%.3fs)",
+                        len(raw_text),
+                        metrics["audio_duration_seconds"],
+                    )
+                else:
+                    logger.info(
+                        "Phone stream contained no non-zero PCM samples "
+                        "(bytes=%s, duration=%.3fs)",
+                        total_audio_bytes,
+                        metrics["audio_duration_seconds"],
+                    )
 
             polished = self._maybe_polish(raw_text, state["polish_mode"])
             logger.info(
@@ -881,10 +967,32 @@ class RomanVoiceDictationService:
                     "backend": getattr(backend, "name", "") if backend else "",
                     "device_info": getattr(backend, "device_info", "") if backend else "",
                     "token_file": config.SERVICE_TOKEN_FILE,
+                    "runtime": self._runtime_identity(),
+                    "http_decode_profile": {
+                        "name": config.SERVICE_HTTP_DECODE_PROFILE,
+                        "language": config.SERVICE_HTTP_FASTER_WHISPER_LANGUAGE,
+                        "condition_on_previous_text": (
+                            config.SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+                        ),
+                        "vad_filter": config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED,
+                        "vad_min_silence_ms": (
+                            config.SERVICE_HTTP_FASTER_WHISPER_VAD_MIN_SILENCE_MS
+                        ),
+                    },
                     "phone": self._phone_status_payload(),
                 }
             )
         return ServiceResponse(HTTPStatus.OK, payload)
+
+    def _runtime_identity(self) -> dict[str, Any]:
+        return {
+            "pid": os.getpid(),
+            "executable": sys.executable,
+            "cwd": os.getcwd(),
+            "service_host": self.host,
+            "service_port": self.port,
+            "base_url": self.base_url,
+        }
 
     def _phone_status_response(self, *, now: float | None = None) -> ServiceResponse:
         payload = {

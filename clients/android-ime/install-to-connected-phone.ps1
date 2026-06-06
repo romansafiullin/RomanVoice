@@ -5,6 +5,7 @@ param(
     [string]$Polish = "settings",
     [string]$PreferredKeyboard = "",
     [bool]$EnableFloatingMic = $true,
+    [switch]$PreferLan,
     [switch]$SetRomanVoiceKeyboard
 )
 
@@ -23,16 +24,66 @@ if (-not (Test-Path $Apk)) {
 if (-not (Test-Path $TokenFile)) {
     throw "RomanVoice token file not found at $TokenFile"
 }
-if (-not $StreamUrl) {
-    $Address = Get-NetIPAddress -AddressFamily IPv4 |
+function Resolve-TailscaleExe {
+    $command = Get-Command "tailscale" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    foreach ($candidate in @(
+        (Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Tailscale\tailscale.exe")
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+
+    return ""
+}
+
+function Resolve-TailscaleIp {
+    if ($PreferLan) {
+        return ""
+    }
+
+    $tailscale = Resolve-TailscaleExe
+    if ($tailscale) {
+        $ipOutput = @(& $tailscale ip -4 2>$null)
+        $ip = $ipOutput |
+            Where-Object { $_ -match '^100\.\d{1,3}\.\d{1,3}\.\d{1,3}$' } |
+            Select-Object -First 1
+        if ($ip) {
+            return $ip
+        }
+    }
+
+    return Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object {
+            $_.InterfaceAlias -match "Tailscale" -and
+            $_.IPAddress -like "100.*"
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+}
+
+function Resolve-LanIp {
+    return Get-NetIPAddress -AddressFamily IPv4 |
         Where-Object {
             $_.IPAddress -notlike "127.*" -and
+            $_.IPAddress -notlike "100.*" -and
             $_.IPAddress -notlike "169.254*" -and
             $_.PrefixOrigin -ne "WellKnown"
         } |
         Select-Object -First 1 -ExpandProperty IPAddress
+}
+
+if (-not $StreamUrl) {
+    $Address = Resolve-TailscaleIp
     if (-not $Address) {
-        throw "Could not determine this PC's LAN IP. Pass -StreamUrl explicitly."
+        $Address = Resolve-LanIp
+    }
+    if (-not $Address) {
+        throw "Could not determine this PC's Tailscale or LAN IP. Pass -StreamUrl explicitly."
     }
     $StreamUrl = "ws://$Address`:8799/v1/transcribe/stream"
 }

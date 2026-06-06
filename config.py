@@ -264,6 +264,11 @@ class AppConfig:
         "and new paragraph into punctuation when they are used as commands. "
         "Preserve the speaker's wording otherwise."
     )
+    FASTER_WHISPER_LEGACY_DICTATION_PROMPT: str = (
+        "This is English voice dictation. Transcribe with natural punctuation, "
+        "sentence capitalization, and paragraph-like clarity while preserving the "
+        "speaker's wording."
+    )
     FASTER_WHISPER_LIGHT_CLEANUP: bool = True
     TRANSCRIPT_GLOSSARY_ENABLED: bool = True
     TRANSCRIPT_GLOSSARY_FILE: str = field(
@@ -296,7 +301,10 @@ class AppConfig:
     GPU_WARMUP_MIN_FREE_MEMORY_MB: int = 3500
     GPU_QUERY_TIMEOUT_MS: int = 1000
     GPU_BUSY_RECHECK_MS: int = 1000
-    GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS: int = 30000
+    GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS: int = _env_int(
+        "ROMANVOICE_GPU_BUSY_TRANSCRIBE_MAX_WAIT_MS",
+        5000,
+    )
     GPU_BUSY_WARMUP_RETRY_MS: int = 30000
     GPU_COOPERATIVE_MONITOR_MS: int = 30000
     GPU_COOPERATIVE_RELOAD_COOLDOWN_MS: int = 180000
@@ -328,6 +336,34 @@ class AppConfig:
         "ROMANVOICE_SERVICE_HTTP_DIAGNOSTIC_UPLOAD_KEEP_COUNT",
         10,
     )
+    SERVICE_HTTP_DECODE_PROFILE: str = os.environ.get(
+        "ROMANVOICE_SERVICE_HTTP_DECODE_PROFILE",
+        "http_batch_legacy_context",
+    ).strip() or "http_batch_legacy_context"
+    SERVICE_HTTP_FASTER_WHISPER_BEAM_SIZE: int = _env_int(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_BEAM_SIZE",
+        5,
+    )
+    SERVICE_HTTP_FASTER_WHISPER_LANGUAGE: str = os.environ.get(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_LANGUAGE",
+        "en",
+    ).strip() or "en"
+    SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT: bool = _env_bool(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        True,
+    )
+    SERVICE_HTTP_FASTER_WHISPER_INITIAL_PROMPT: str = os.environ.get(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_INITIAL_PROMPT",
+        FASTER_WHISPER_LEGACY_DICTATION_PROMPT,
+    ).strip() or FASTER_WHISPER_LEGACY_DICTATION_PROMPT
+    SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED: bool = _env_bool(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED",
+        True,
+    )
+    SERVICE_HTTP_FASTER_WHISPER_VAD_MIN_SILENCE_MS: int = _env_int(
+        "ROMANVOICE_SERVICE_HTTP_FASTER_WHISPER_VAD_MIN_SILENCE_MS",
+        400,
+    )
     SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS: float = _env_float(
         "ROMANVOICE_SERVICE_HTTP_LONG_FORM_CHUNK_MIN_SECONDS",
         45.0,
@@ -351,9 +387,16 @@ class AppConfig:
     STREAMING_QUEUE_SIZE: int = 10  # Maximum queued chunks (prevents memory issues)
     STREAMING_BEAM_SIZE: int = 3  # Smaller beam size for faster processing
     STREAMING_VAD_ENABLED: bool = _env_bool("ROMANVOICE_STREAMING_VAD_ENABLED", True)
+    PHONE_STREAM_FINAL_PASS_ENABLED: bool = _env_bool(
+        "ROMANVOICE_PHONE_STREAM_FINAL_PASS_ENABLED",
+        False,
+    )
     SHORT_FORM_FINAL_SKIP_MAX_SECONDS: float = 4.0
     SHORT_FORM_FINAL_SKIP_MIN_CHARS: int = 10
-    GPU_BUSY_STREAMING_FINAL_SKIP_MAX_SECONDS: float = 30.0
+    GPU_BUSY_STREAMING_FINAL_SKIP_MAX_SECONDS: float = _env_float(
+        "ROMANVOICE_GPU_BUSY_STREAMING_FINAL_SKIP_MAX_SECONDS",
+        90.0,
+    )
     GPU_BUSY_STREAMING_FINAL_SKIP_MIN_CHARS: int = 10
     LONG_FORM_STREAMING_FALLBACK_MIN_SECONDS: float = 45.0
     LONG_FORM_STREAMING_FALLBACK_MIN_CHARS: int = 300

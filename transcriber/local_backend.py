@@ -9,7 +9,7 @@ This backend uses faster-whisper (CTranslate2) which provides:
 """
 import logging
 import threading
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple
 from faster_whisper import WhisperModel
 from .base import TranscriptionBackend
 from .transcript_cleanup import clean_transcript_text
@@ -226,7 +226,40 @@ class LocalWhisperBackend(TranscriptionBackend):
             logger.error(f"Failed to load faster-whisper model: {e}")
             self.model = None
 
-    def transcribe(self, audio_path: str) -> str:
+    @staticmethod
+    def decode_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Build faster-whisper decode options with optional caller overrides."""
+        vad_filter = config.FASTER_WHISPER_VAD_ENABLED
+        options: dict[str, Any] = {
+            "beam_size": config.FASTER_WHISPER_BEAM_SIZE,
+            "language": config.FASTER_WHISPER_LANGUAGE,
+            "condition_on_previous_text": config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+            "initial_prompt": config.FASTER_WHISPER_INITIAL_PROMPT,
+            "compression_ratio_threshold": config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
+            "log_prob_threshold": config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
+            "no_speech_threshold": config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
+            "vad_filter": vad_filter,
+        }
+        if vad_filter:
+            options["vad_parameters"] = {
+                "min_silence_duration_ms": config.FASTER_WHISPER_VAD_MIN_SILENCE_MS
+            }
+        if overrides:
+            options.update(overrides)
+        if options.get("vad_filter") and not options.get("vad_parameters"):
+            options["vad_parameters"] = {
+                "min_silence_duration_ms": config.FASTER_WHISPER_VAD_MIN_SILENCE_MS
+            }
+        if not options.get("vad_filter"):
+            options.pop("vad_parameters", None)
+        return options
+
+    def transcribe(
+        self,
+        audio_path: str,
+        *,
+        decode_options: dict[str, Any] | None = None,
+    ) -> str:
         """Transcribe audio file using faster-whisper model.
 
         Args:
@@ -246,27 +279,19 @@ class LocalWhisperBackend(TranscriptionBackend):
             self.is_transcribing = True
             self.reset_cancel_flag()
 
-            logger.info(f"Processing audio with faster-whisper (VAD={config.FASTER_WHISPER_VAD_ENABLED})...")
-
-            # Configure VAD parameters if enabled
-            vad_params = None
-            if config.FASTER_WHISPER_VAD_ENABLED:
-                vad_params = dict(
-                    min_silence_duration_ms=config.FASTER_WHISPER_VAD_MIN_SILENCE_MS
-                )
+            options = self.decode_options(decode_options)
+            logger.info(
+                "Processing audio with faster-whisper "
+                "(VAD=%s, condition_on_previous_text=%s, language=%s)...",
+                options.get("vad_filter"),
+                options.get("condition_on_previous_text"),
+                options.get("language"),
+            )
 
             # Transcribe - returns a generator of segments and transcription info
             segments, info = self.model.transcribe(
                 audio_path,
-                beam_size=config.FASTER_WHISPER_BEAM_SIZE,
-                language=config.FASTER_WHISPER_LANGUAGE,
-                condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
-                initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
-                compression_ratio_threshold=config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
-                log_prob_threshold=config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
-                no_speech_threshold=config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
-                vad_filter=config.FASTER_WHISPER_VAD_ENABLED,
-                vad_parameters=vad_params
+                **options,
             )
 
             logger.info(f"Detected language: {info.language} "
@@ -295,7 +320,12 @@ class LocalWhisperBackend(TranscriptionBackend):
         finally:
             self.is_transcribing = False
 
-    def transcribe_chunks(self, chunk_files: List[str]) -> str:
+    def transcribe_chunks(
+        self,
+        chunk_files: List[str],
+        *,
+        decode_options: dict[str, Any] | None = None,
+    ) -> str:
         """Transcribe multiple audio chunk files efficiently with faster-whisper.
 
         Args:
@@ -317,12 +347,7 @@ class LocalWhisperBackend(TranscriptionBackend):
 
             transcriptions = []
 
-            # Configure VAD parameters if enabled
-            vad_params = None
-            if config.FASTER_WHISPER_VAD_ENABLED:
-                vad_params = dict(
-                    min_silence_duration_ms=config.FASTER_WHISPER_VAD_MIN_SILENCE_MS
-                )
+            options = self.decode_options(decode_options)
 
             for i, chunk_file in enumerate(chunk_files):
                 if self.should_cancel:
@@ -334,15 +359,7 @@ class LocalWhisperBackend(TranscriptionBackend):
                 # Transcribe individual chunk
                 segments, info = self.model.transcribe(
                     chunk_file,
-                    beam_size=config.FASTER_WHISPER_BEAM_SIZE,
-                    language=config.FASTER_WHISPER_LANGUAGE,
-                    condition_on_previous_text=config.FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
-                    initial_prompt=config.FASTER_WHISPER_INITIAL_PROMPT,
-                    compression_ratio_threshold=config.FASTER_WHISPER_COMPRESSION_RATIO_THRESHOLD,
-                    log_prob_threshold=config.FASTER_WHISPER_LOG_PROB_THRESHOLD,
-                    no_speech_threshold=config.FASTER_WHISPER_NO_SPEECH_THRESHOLD,
-                    vad_filter=config.FASTER_WHISPER_VAD_ENABLED,
-                    vad_parameters=vad_params
+                    **options,
                 )
 
                 # Collect text from segments
