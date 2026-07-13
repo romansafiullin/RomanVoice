@@ -16,8 +16,10 @@ def test_firewall_remediation_is_scoped_backed_up_and_reversible():
     assert "-InterfaceAlias $TailscaleInterfaceAlias" in script
     assert "-Profile Private" in script
     assert "Get-BroadPythonPublicAllowRules" in script
-    assert "$broadRules | Disable-NetFirewallRule" in script
-    assert "$genericRules | Disable-NetFirewallRule" in script
+    assert "function Disable-PersistentFirewallRules" in script
+    assert "-PolicyStore PersistentStore" in script
+    assert "Disable-PersistentFirewallRules -Rules $broadRules" in script
+    assert "Disable-PersistentFirewallRules -Rules $genericRules" in script
     assert "advfirewall import" in script
     assert "Remove-NetFirewallRule" in script
     assert "Python314" not in script

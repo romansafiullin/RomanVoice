@@ -64,6 +64,29 @@ function Write-RuleSummary {
     )
 }
 
+function Disable-PersistentFirewallRules {
+    param([Parameter(Mandatory=$true)][object[]]$Rules)
+
+    foreach ($rule in $Rules) {
+        # Objects returned from ActiveStore cannot always be piped back into a
+        # mutating cmdlet on Windows 11. Address the durable local rule by its
+        # stable Name in PersistentStore instead.
+        Set-NetFirewallRule `
+            -PolicyStore PersistentStore `
+            -Name $rule.Name `
+            -Enabled False `
+            -ErrorAction Stop
+
+        $readback = Get-NetFirewallRule `
+            -PolicyStore PersistentStore `
+            -Name $rule.Name `
+            -ErrorAction Stop
+        if ($readback.Enabled -ne 'False') {
+            throw "Firewall rule '$($rule.Name)' did not disable successfully."
+        }
+    }
+}
+
 $tailscaleAddress = Get-TailscaleLocalAddress
 $broadRules = @(Get-BroadPythonPublicAllowRules)
 $genericRules = @(Get-NetFirewallRule -DisplayName $legacyRomanVoiceRule -ErrorAction SilentlyContinue)
@@ -113,8 +136,8 @@ New-NetFirewallRule `
     -InterfaceAlias $TailscaleInterfaceAlias `
     -Program $PythonwPath | Out-Null
 
-$broadRules | Disable-NetFirewallRule
-$genericRules | Disable-NetFirewallRule
+Disable-PersistentFirewallRules -Rules $broadRules
+Disable-PersistentFirewallRules -Rules $genericRules
 
 $scoped = Get-NetFirewallRule -Name $RuleName -ErrorAction Stop
 if ($scoped.Enabled -ne 'True') {
