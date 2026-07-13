@@ -240,7 +240,7 @@ def recv_server_json(sock: socket.socket) -> dict:
 def open_websocket(url: str, *, token: str | None = None) -> tuple[socket.socket, bytes]:
     parsed = urllib.parse.urlparse(url)
     sock = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
-    key = base64.b64encode(b"romanvoice-test-key").decode("ascii")
+    key = base64.b64encode(b"0123456789abcdef").decode("ascii")
     path = parsed.path
     if parsed.query:
         path += f"?{parsed.query}"
@@ -264,6 +264,47 @@ def send_text(sock: socket.socket, payload: dict) -> None:
 
 def send_binary(sock: socket.socket, payload: bytes) -> None:
     sock.sendall(make_client_frame(0x2, payload))
+
+
+def test_unauthenticated_health_is_loopback_only():
+    controller = FakeController()
+    service = RomanVoiceDictationService(
+        controller,
+        host="127.0.0.1",
+        port=0,
+        token="secret",
+    )
+    service.start()
+    try:
+        payload = get_json(f"{service.base_url}/health")
+    finally:
+        service.stop()
+
+    assert payload == {"ok": True, "service": "RomanVoice"}
+    assert service._is_loopback_request(
+        SimpleNamespace(client_address=("127.0.0.1", 1234))
+    )
+    assert service._is_loopback_request(
+        SimpleNamespace(client_address=("::1", 1234))
+    )
+    assert not service._is_loopback_request(
+        SimpleNamespace(client_address=("100.64.0.10", 1234))
+    )
+
+
+def test_request_source_is_sanitized_and_does_not_include_authorization():
+    source = RomanVoiceDictationService._request_source(
+        SimpleNamespace(
+            client_address=("100.64.0.10", 1234),
+            headers={
+                "X-RomanVoice-Client": "android-floating\r\nignored",
+                "Authorization": "Bearer secret-token",
+            },
+        )
+    )
+
+    assert source == "100.64.0.10/android-floating ignored"
+    assert "secret-token" not in source
 
 
 def test_service_rejects_unauthenticated_transcribe():
@@ -508,6 +549,55 @@ def test_service_rejects_unauthenticated_streaming_websocket():
         service.stop()
 
     assert b" 401 " in response
+
+
+def test_service_rejects_unmasked_client_websocket_frames():
+    controller = FakeController(FakeStreamingBackend())
+    service = RomanVoiceDictationService(
+        controller,
+        host="127.0.0.1",
+        port=0,
+        token="secret",
+    )
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        sock.sendall(b"\x81\x02{}")
+        assert recv_server_json(sock)["type"] == "close"
+        sock.close()
+    finally:
+        service.stop()
+
+
+def test_service_rejects_oversized_websocket_frame_before_payload_read():
+    controller = FakeController(FakeStreamingBackend())
+    service = RomanVoiceDictationService(
+        controller,
+        host="127.0.0.1",
+        port=0,
+        token="secret",
+    )
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        oversized_length = (4 * 1024 * 1024) + 1
+        sock.sendall(b"\x82\xff" + struct.pack("!Q", oversized_length))
+        assert recv_server_json(sock)["type"] == "close"
+        sock.close()
+    finally:
+        service.stop()
 
 
 def test_service_streams_pcm16_audio_with_bearer_token(tmp_path, monkeypatch):

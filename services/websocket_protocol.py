@@ -33,24 +33,51 @@ def websocket_accept_key(client_key: str) -> str:
 class WebSocketConnection:
     """Small RFC 6455 subset sufficient for local JSON + binary audio streams."""
 
-    def __init__(self, handler: BaseHTTPRequestHandler) -> None:
+    def __init__(
+        self,
+        handler: BaseHTTPRequestHandler,
+        *,
+        max_frame_bytes: int = 1024 * 1024,
+    ) -> None:
+        if max_frame_bytes <= 0:
+            raise ValueError("max_frame_bytes must be positive")
         self.handler = handler
+        self.max_frame_bytes = int(max_frame_bytes)
         self._send_lock = threading.Lock()
         self.closed = False
 
     @classmethod
-    def accept(cls, handler: BaseHTTPRequestHandler) -> "WebSocketConnection":
+    def accept(
+        cls,
+        handler: BaseHTTPRequestHandler,
+        *,
+        max_frame_bytes: int = 1024 * 1024,
+    ) -> "WebSocketConnection":
         key = handler.headers.get("Sec-WebSocket-Key", "").strip()
         upgrade = handler.headers.get("Upgrade", "").lower()
-        if upgrade != "websocket" or not key:
+        connection = handler.headers.get("Connection", "").lower()
+        version = handler.headers.get("Sec-WebSocket-Version", "").strip()
+        if (
+            upgrade != "websocket"
+            or "upgrade" not in {value.strip() for value in connection.split(",")}
+            or not key
+        ):
             raise WebSocketProtocolError("missing WebSocket upgrade headers")
+        if version != "13":
+            raise WebSocketProtocolError("unsupported WebSocket version")
+        try:
+            decoded_key = base64.b64decode(key, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise WebSocketProtocolError("invalid WebSocket key") from exc
+        if len(decoded_key) != 16:
+            raise WebSocketProtocolError("invalid WebSocket key")
 
         handler.send_response(101, "Switching Protocols")
         handler.send_header("Upgrade", "websocket")
         handler.send_header("Connection", "Upgrade")
         handler.send_header("Sec-WebSocket-Accept", websocket_accept_key(key))
         handler.end_headers()
-        return cls(handler)
+        return cls(handler, max_frame_bytes=max_frame_bytes)
 
     def read_message(self) -> WebSocketMessage:
         while True:
@@ -61,17 +88,29 @@ class WebSocketConnection:
             masked = bool(second & 0x80)
             length = second & 0x7F
 
+            if first & 0x70:
+                raise WebSocketProtocolError("reserved WebSocket bits are not supported")
             if not fin:
                 raise WebSocketProtocolError("fragmented WebSocket frames are not supported")
+            if not masked:
+                raise WebSocketProtocolError("client WebSocket frames must be masked")
             if length == 126:
                 length = struct.unpack("!H", self._read_exact(2))[0]
             elif length == 127:
                 length = struct.unpack("!Q", self._read_exact(8))[0]
+                if length & (1 << 63):
+                    raise WebSocketProtocolError("invalid WebSocket frame length")
 
-            mask = self._read_exact(4) if masked else b""
+            if opcode >= 0x8 and length > 125:
+                raise WebSocketProtocolError("WebSocket control frame is too large")
+            if length > self.max_frame_bytes:
+                raise WebSocketProtocolError(
+                    f"WebSocket frame exceeds {self.max_frame_bytes} byte limit"
+                )
+
+            mask = self._read_exact(4)
             payload = self._read_exact(length) if length else b""
-            if masked:
-                payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
 
             if opcode == 0x8:
                 self.closed = True
@@ -122,11 +161,16 @@ class WebSocketConnection:
             self.handler.wfile.flush()
 
     def _read_exact(self, length: int) -> bytes:
-        data = self.handler.rfile.read(length)
-        if len(data) != length:
-            self.closed = True
-            raise WebSocketProtocolError("WebSocket connection closed")
-        return data
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining:
+            chunk = self.handler.rfile.read(remaining)
+            if not chunk:
+                self.closed = True
+                raise WebSocketProtocolError("WebSocket connection closed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
 
 def make_client_frame(opcode: int, payload: bytes) -> bytes:

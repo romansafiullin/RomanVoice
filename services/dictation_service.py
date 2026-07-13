@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from config import config, ensure_service_token
+from config import config, ensure_service_token, service_token_configuration
 from services.polisher import local_polisher
 from services.settings import SettingsKey, settings_manager
 from services.streaming_transcript_guard import choose_streaming_transcript
@@ -43,6 +44,8 @@ _CONTENT_TYPE_SUFFIXES = (
     ("audio/x-wav", ".wav"),
 )
 _PHONE_HEARTBEAT_STALE_SECONDS = 180
+_WEBSOCKET_IDLE_TIMEOUT_SECONDS = 30
+_WEBSOCKET_MAX_FRAME_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,16 @@ class RomanVoiceDictationService:
         self.host = host or config.SERVICE_HOST
         self.port = int(port if port is not None else config.SERVICE_PORT)
         self.token = token if token is not None else ensure_service_token()
+        self._token_configuration = (
+            {"source": "explicit"}
+            if token is not None
+            else service_token_configuration()
+        )
+        if self._token_configuration.get("environment_file_mismatch"):
+            logger.warning(
+                "ROMANVOICE_SERVICE_TOKEN differs from the durable token file; "
+                "the environment value is active"
+            )
         self.max_audio_bytes = int(
             (max_audio_mb if max_audio_mb is not None else config.SERVICE_MAX_AUDIO_MB)
             * 1024
@@ -158,6 +171,15 @@ class RomanVoiceDictationService:
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urllib.parse.urlparse(self.path)
                 if parsed.path == "/health":
+                    if not service._is_loopback_request(self):
+                        service._send_json(
+                            self,
+                            ServiceResponse(
+                                HTTPStatus.FORBIDDEN,
+                                {"ok": False, "error": "loopback access required"},
+                            ),
+                        )
+                        return
                     service._send_json(
                         self,
                         ServiceResponse(
@@ -228,6 +250,11 @@ class RomanVoiceDictationService:
         header = handler.headers.get("Authorization", "")
         expected = f"Bearer {self.token}"
         if not secrets.compare_digest(header, expected):
+            logger.warning(
+                "RomanVoice service rejected authentication path=%s source=%s",
+                urllib.parse.urlparse(handler.path).path,
+                self._request_source(handler),
+            )
             return ServiceResponse(
                 HTTPStatus.UNAUTHORIZED,
                 {"ok": False, "error": "missing or invalid bearer token"},
@@ -263,6 +290,13 @@ class RomanVoiceDictationService:
 
         audio_bytes = handler.rfile.read(content_length)
         content_type = handler.headers.get("Content-Type") or "application/octet-stream"
+        request_source = self._request_source(handler)
+        logger.info(
+            "RomanVoice HTTP upload received source=%s content_type=%s bytes=%s",
+            request_source,
+            content_type,
+            len(audio_bytes),
+        )
         query = urllib.parse.parse_qs(parsed.query)
         polish_mode = (query.get("polish") or ["settings"])[0].strip().lower()
 
@@ -278,9 +312,21 @@ class RomanVoiceDictationService:
                 started=started,
                 debug_audio_path=debug_audio_path,
             )
+            logger.info(
+                "RomanVoice HTTP upload completed source=%s final_source=%s chars=%s duration=%.3fs",
+                request_source,
+                payload.get("final_source", ""),
+                len(str(payload.get("text") or "")),
+                float(payload.get("duration_seconds") or 0.0),
+            )
             return ServiceResponse(HTTPStatus.OK, payload)
         except Exception as exc:
-            logger.warning("Service transcription failed: %s", exc, exc_info=True)
+            logger.warning(
+                "Service transcription failed source=%s: %s",
+                request_source,
+                exc,
+                exc_info=True,
+            )
             return ServiceResponse(
                 HTTPStatus.BAD_GATEWAY,
                 {"ok": False, "error": str(exc)},
@@ -656,13 +702,20 @@ class RomanVoiceDictationService:
         }
 
         try:
-            websocket = WebSocketConnection.accept(handler)
+            handler.connection.settimeout(_WEBSOCKET_IDLE_TIMEOUT_SECONDS)
+            websocket = WebSocketConnection.accept(
+                handler,
+                max_frame_bytes=min(self.max_audio_bytes, _WEBSOCKET_MAX_FRAME_BYTES),
+            )
         except WebSocketProtocolError as exc:
             self._send_json(
                 handler,
                 ServiceResponse(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}),
             )
             return
+
+        request_source = self._request_source(handler)
+        logger.info("RomanVoice phone stream connected source=%s", request_source)
 
         def send_partial(text: str, is_final: bool) -> None:
             state["sequence"] += 1
@@ -796,8 +849,9 @@ class RomanVoiceDictationService:
 
             polished = self._maybe_polish(raw_text, state["polish_mode"])
             logger.info(
-                "Phone stream final source=%s bytes=%s duration=%.3fs peak=%s rms=%.1f "
+                "Phone stream final client=%s source=%s bytes=%s duration=%.3fs peak=%s rms=%.1f "
                 "rolling_chars=%s final_chars=%s debug_audio=%s",
+                request_source,
                 final_source,
                 total_audio_bytes,
                 metrics["audio_duration_seconds"],
@@ -925,7 +979,7 @@ class RomanVoiceDictationService:
                     continue
 
         except (OSError, WebSocketProtocolError) as exc:
-            logger.info("Streaming WebSocket closed: %s", exc)
+            logger.info("Streaming WebSocket closed source=%s: %s", request_source, exc)
         except Exception as exc:
             logger.warning("Streaming transcription failed: %s", exc, exc_info=True)
             try:
@@ -985,6 +1039,7 @@ class RomanVoiceDictationService:
                     "backend": getattr(backend, "name", "") if backend else "",
                     "device_info": getattr(backend, "device_info", "") if backend else "",
                     "token_file": config.SERVICE_TOKEN_FILE,
+                    "token_configuration": dict(self._token_configuration),
                     "runtime": self._runtime_identity(),
                     "http_decode_profile": {
                         "name": config.SERVICE_HTTP_DECODE_PROFILE,
@@ -998,6 +1053,14 @@ class RomanVoiceDictationService:
                         ),
                     },
                     "phone": self._phone_status_payload(),
+                    "transport": {
+                        "authentication": "bearer",
+                        "websocket_idle_timeout_seconds": _WEBSOCKET_IDLE_TIMEOUT_SECONDS,
+                        "websocket_max_frame_bytes": min(
+                            self.max_audio_bytes,
+                            _WEBSOCKET_MAX_FRAME_BYTES,
+                        ),
+                    },
                 }
             )
         return ServiceResponse(HTTPStatus.OK, payload)
@@ -1057,6 +1120,27 @@ class RomanVoiceDictationService:
     @staticmethod
     def _epoch_to_utc(value: float) -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
+
+    @staticmethod
+    def _is_loopback_request(handler: BaseHTTPRequestHandler) -> bool:
+        try:
+            return ipaddress.ip_address(str(handler.client_address[0])).is_loopback
+        except (IndexError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _request_source(handler: BaseHTTPRequestHandler) -> str:
+        try:
+            remote = str(handler.client_address[0])
+        except (AttributeError, IndexError, TypeError):
+            remote = "unknown"
+        client = (
+            handler.headers.get("X-RomanVoice-Client", "")
+            or handler.headers.get("User-Agent", "")
+            or "unspecified"
+        )
+        safe_client = " ".join(str(client).split())[:96]
+        return f"{remote}/{safe_client}"
 
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, response: ServiceResponse) -> None:

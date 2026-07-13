@@ -74,7 +74,8 @@ def _service_token_default() -> str:
     token_file = _service_token_file()
     try:
         if os.path.exists(token_file):
-            token = open(token_file, "r", encoding="utf-8").read().strip()
+            with open(token_file, "r", encoding="utf-8") as handle:
+                token = handle.read().strip()
             if token:
                 return token
     except OSError:
@@ -88,15 +89,61 @@ def ensure_service_token() -> str:
         return config.SERVICE_TOKEN
 
     token = secrets.token_urlsafe(32)
+    token_file = config.SERVICE_TOKEN_FILE
+    parent = os.path.dirname(token_file)
+    temp_file = f"{token_file}.{secrets.token_hex(6)}.tmp"
     try:
-        os.makedirs(os.path.dirname(config.SERVICE_TOKEN_FILE), exist_ok=True)
-        with open(config.SERVICE_TOKEN_FILE, "w", encoding="utf-8") as handle:
+        os.makedirs(parent, exist_ok=True)
+        descriptor = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(token + "\n")
-    except OSError:
-        # The service will still require this in-memory token for the current run.
-        pass
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_file, token_file)
+        os.chmod(token_file, 0o600)
+    except OSError as exc:
+        try:
+            os.remove(temp_file)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Unable to persist the RomanVoice service token at {token_file}"
+        ) from exc
     config.SERVICE_TOKEN = token
     return token
+
+
+def service_token_configuration() -> dict[str, bool | str]:
+    """Return non-secret token custody information for diagnostics."""
+    environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
+    file_token = ""
+    try:
+        with open(config.SERVICE_TOKEN_FILE, "r", encoding="utf-8") as handle:
+            file_token = handle.read().strip()
+    except OSError:
+        pass
+
+    active_token = config.SERVICE_TOKEN
+    if environment_token:
+        source = "environment"
+    elif file_token:
+        source = "file"
+    elif active_token:
+        source = "memory"
+    else:
+        source = "missing"
+
+    return {
+        "source": source,
+        "file_present": bool(file_token),
+        "environment_present": bool(environment_token),
+        "environment_file_mismatch": bool(
+            environment_token and file_token and environment_token != file_token
+        ),
+        "active_file_mismatch": bool(
+            active_token and file_token and active_token != file_token
+        ),
+    }
 
 
 @dataclass
