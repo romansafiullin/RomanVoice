@@ -59,6 +59,8 @@ def test_phone_installer_fails_closed_to_tailscale_and_preserves_endpoint():
     assert "Assert-ApprovedStreamUrl $StreamUrl" in script
     assert "$PreferLan -and (Test-PrivateLanHost $uri.DnsSafeHost)" in script
     assert "Resolve-LanIp" in script
+    assert '<boolean name="allow_lan_stream" value="$AllowLanStream" />' in script
+    assert 'Get-PreferenceBooleanValue $ReadbackXml "allow_lan_stream"' in script
 
 
 def test_phone_installer_streams_secrets_without_temporary_token_files():
@@ -111,6 +113,9 @@ def test_phone_tile_health_rejects_implicit_lan_and_probes_tailscale_path():
     assert "toybox nc" in script
     assert "101\\s+Switching Protocols" in script
     assert script.count("direct phone-to-service health could not be proven") == 2
+    assert "Get-PreferenceBooleanValue $prefsText 'allow_lan_stream'" in script
+    assert "LAN developer override is not explicitly disabled" in script
+    assert "LAN URL without the installer-only LAN override" in script
 
 
 def test_phone_tile_health_compares_non_secret_token_fingerprints():
@@ -126,6 +131,19 @@ def test_phone_tile_health_compares_non_secret_token_fingerprints():
     assert "$request | & $AdbPath shell $remoteCommand" in script
     assert "Write-Output $phoneToken" not in script
     assert "Write-Output $token" not in script
+
+
+def test_phone_tile_health_rejects_stale_android_build_identity():
+    script = (PROJECT_ROOT / "scripts" / "check-phone-tile-health.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "clients\\android-ime\\version.properties" in script
+    assert '$ExpectedVersionName = "$($VersionProperties.versionName)-debug"' in script
+    assert "dumpsys package $PackageName" in script
+    assert "versionCode=(\\d+)" in script
+    assert "versionName=([^\\s]+)" in script
+    assert "Android build is stale or unexpected" in script
 
 
 def test_android_manifest_declares_floating_accessibility_service():
@@ -425,6 +443,31 @@ def test_android_stream_client_uses_connect_timeout_and_ping_keepalive():
     assert "RomanVoice stream ping timed out" in source
 
 
+def test_android_stream_client_validates_handshake_and_caps_untrusted_input():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceStreamClient.java"
+    ).read_text(encoding="utf-8")
+
+    assert "MAX_HTTP_HEADER_BYTES = 16384" in source
+    assert "MAX_INBOUND_FRAME_BYTES = 4L * 1024L * 1024L" in source
+    assert 'responseHeaderValue(response, "Sec-WebSocket-Accept")' in source
+    assert "expectedWebSocketAccept(key)" in source
+    assert "length > MAX_INBOUND_FRAME_BYTES" in source
+    assert source.index("length > MAX_INBOUND_FRAME_BYTES") < source.index(
+        "readExact((int) length)"
+    )
+    assert "buffer.size() >= MAX_HTTP_HEADER_BYTES" in source
+    assert "server sent a masked WebSocket frame" in source
+
+
 def test_floating_service_falls_back_to_focused_editable_descendant():
     source = (
         ANDROID_IME_ROOT
@@ -498,6 +541,9 @@ def test_settings_activity_can_prompt_for_quick_settings_tile():
     assert "requestAddTileService" in source
     assert "StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED" in source
     assert 'tileButton.setText("Add RomanVoice Quick Settings tile")' in source
+    assert "RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)" in source
+    assert "RomanVoicePreferences.allowLanStream(this)" in source
+    assert 'tokenField.setError("RomanVoice token is required")' in source
 
 
 def test_floating_service_ignores_message_placeholder_text():
@@ -517,6 +563,77 @@ def test_floating_service_ignores_message_placeholder_text():
     assert "isKnownPlaceholder" in source
     assert "RCS message" in source
     assert "com.google.android.apps.messaging" in source
+    assert source.index('!"com.google.android.apps.messaging".contentEquals(packageName)') < source.index(
+        'return "RCS message".equalsIgnoreCase(normalized)'
+    )
+
+
+def test_android_surfaces_fail_closed_and_probe_auth_before_claiming_ready():
+    preferences = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoicePreferences.java"
+    ).read_text(encoding="utf-8")
+    floating = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    ime = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+    tile = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceTileService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "KEY_ALLOW_LAN_STREAM" in preferences
+    assert "isApprovedStreamUrl(Context context, String streamUrl)" in preferences
+    assert "isTailscaleHost(normalizedHost)" in preferences
+    assert "allowLanStream && isPrivateLanHost(normalizedHost)" in preferences
+    assert "checkIdleServiceHealth();" in floating
+    assert "requestHealthCheckForTile()" in floating
+    assert "if (phase == RomanVoiceRecordingPhase.IDLE)" in floating
+    assert 'healthUrl.append("/v1/health")' in floating
+    assert '"Authorization", "Bearer " + token.trim()' in floating
+    assert "completeSession(generation, RomanVoiceRecordingPhase.IDLE)" in floating
+    assert "keepOverlayHidden" in floating
+    assert 'handleStreamError(generation, finalFailure, "idle_health_failed")' in floating
+    assert "retryFailureNotice = failureNotice" in floating
+    assert "canceledUnverifiedRetry" in floating
+    assert "markConnectionVerified(generation)" in floating
+    assert floating.count("if (idleHealthCheck)") >= 2
+    assert "invalidateSession(RomanVoiceRecordingPhase.IDLE);" in floating
+    assert "RomanVoiceFloatingService.requestHealthCheckForTile();" in tile
+    assert "RomanVoiceRecordingPhase.ERROR" in ime
+    assert "if (!finalHealthy)" in ime
 
 
 def test_android_runtime_keeps_failures_visible_and_cancel_available_while_busy():

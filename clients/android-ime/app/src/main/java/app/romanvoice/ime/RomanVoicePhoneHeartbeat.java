@@ -48,6 +48,7 @@ final class RomanVoicePhoneHeartbeat {
         if (streamUrl == null
                 || streamUrl.trim().isEmpty()
                 || RomanVoicePreferences.isDefaultStreamUrl(streamUrl)
+                || !RomanVoicePreferences.isApprovedStreamUrl(context, streamUrl)
                 || token == null
                 || token.trim().isEmpty()) {
             return;

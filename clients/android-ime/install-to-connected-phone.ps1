@@ -192,6 +192,29 @@ function Get-PreferenceValue {
     return ""
 }
 
+function Get-PreferenceBooleanValue {
+    param(
+        [string]$XmlText,
+        [string]$Name
+    )
+
+    if (-not $XmlText) {
+        return ""
+    }
+    try {
+        [xml]$document = $XmlText
+        $node = @($document.map.boolean) |
+            Where-Object { $_.name -eq $Name } |
+            Select-Object -First 1
+        if ($node) {
+            return ([string]$node.value).ToLowerInvariant()
+        }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
 function Get-Sha256Fingerprint {
     param([string]$Value)
 
@@ -354,6 +377,7 @@ if (-not $Token) {
     throw "RomanVoice token file is empty: $TokenFile"
 }
 $TokenFingerprint = Get-Sha256Fingerprint $Token
+$AllowLanStream = if ($PreferLan) { "true" } else { "false" }
 
 $Prefs = @"
 <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
@@ -361,6 +385,7 @@ $Prefs = @"
     <string name="stream_url">$(Escape-Xml $StreamUrl)</string>
     <string name="token">$(Escape-Xml $Token)</string>
     <string name="polish">$(Escape-Xml $Polish)</string>
+    <boolean name="allow_lan_stream" value="$AllowLanStream" />
 </map>
 "@
 
@@ -379,7 +404,13 @@ try {
     $ReadbackStreamUrl = Get-PreferenceValue $ReadbackXml "stream_url"
     $ReadbackPolish = Get-PreferenceValue $ReadbackXml "polish"
     $ReadbackToken = Get-PreferenceValue $ReadbackXml "token"
-    if ($ReadbackStreamUrl -ne $StreamUrl -or $ReadbackPolish -ne $Polish -or -not $ReadbackToken) {
+    $ReadbackAllowLanStream = Get-PreferenceBooleanValue $ReadbackXml "allow_lan_stream"
+    if (
+        $ReadbackStreamUrl -ne $StreamUrl -or
+        $ReadbackPolish -ne $Polish -or
+        $ReadbackAllowLanStream -ne $AllowLanStream -or
+        -not $ReadbackToken
+    ) {
         throw "RomanVoice app preference readback did not match the requested non-secret configuration."
     }
     $ReadbackTokenFingerprint = Get-Sha256Fingerprint $ReadbackToken

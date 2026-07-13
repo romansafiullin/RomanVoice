@@ -22,6 +22,7 @@ public class RomanVoiceTileService extends TileService {
     @Override
     public void onStartListening() {
         super.onStartListening();
+        RomanVoiceFloatingService.requestHealthCheckForTile();
         updateTile();
     }
 

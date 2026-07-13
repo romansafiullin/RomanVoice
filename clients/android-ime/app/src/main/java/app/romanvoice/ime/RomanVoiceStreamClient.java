@@ -15,6 +15,8 @@ import java.net.Socket;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -25,6 +27,9 @@ final class RomanVoiceStreamClient implements Closeable {
     private static final long PING_INTERVAL_MS = 5000;
     private static final long PONG_TIMEOUT_MS = 12000;
     private static final long THREAD_JOIN_TIMEOUT_MS = 750;
+    private static final int MAX_HTTP_HEADER_BYTES = 16384;
+    private static final long MAX_INBOUND_FRAME_BYTES = 4L * 1024L * 1024L;
+    private static final String WEBSOCKET_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     interface Listener {
         void onReady();
@@ -116,6 +121,11 @@ final class RomanVoiceStreamClient implements Closeable {
         if (!response.startsWith("HTTP/1.1 101") && !response.startsWith("HTTP/1.0 101")) {
             String firstLine = response.split("\r\n", 2)[0];
             throw new IOException("RomanVoice refused stream: " + firstLine);
+        }
+        String expectedAccept = expectedWebSocketAccept(key);
+        String actualAccept = responseHeaderValue(response, "Sec-WebSocket-Accept");
+        if (!expectedAccept.equals(actualAccept)) {
+            throw new IOException("RomanVoice returned an invalid WebSocket handshake");
         }
         socket.setSoTimeout(0);
 
@@ -314,6 +324,12 @@ final class RomanVoiceStreamClient implements Closeable {
         int first = readByte();
         int second = readByte();
         int opcode = first & 0x0F;
+        if ((first & 0x70) != 0) {
+            throw new IOException("RomanVoice sent unsupported WebSocket extensions");
+        }
+        if ((first & 0x80) == 0) {
+            throw new IOException("RomanVoice sent a fragmented WebSocket frame");
+        }
         long length = second & 0x7F;
         if (length == 126) {
             length = ByteBuffer.wrap(readExact(2)).getShort() & 0xFFFF;
@@ -321,14 +337,18 @@ final class RomanVoiceStreamClient implements Closeable {
             length = ByteBuffer.wrap(readExact(8)).getLong();
         }
 
-        boolean masked = (second & 0x80) != 0;
-        byte[] mask = masked ? readExact(4) : new byte[0];
-        byte[] payload = readExact((int) length);
-        if (masked) {
-            for (int index = 0; index < payload.length; index++) {
-                payload[index] = (byte) (payload[index] ^ mask[index % 4]);
-            }
+        if (length < 0 || length > MAX_INBOUND_FRAME_BYTES) {
+            throw new IOException("RomanVoice WebSocket frame is too large");
         }
+        if ((opcode & 0x08) != 0 && length > 125) {
+            throw new IOException("RomanVoice sent an oversized WebSocket control frame");
+        }
+
+        boolean masked = (second & 0x80) != 0;
+        if (masked) {
+            throw new IOException("RomanVoice server sent a masked WebSocket frame");
+        }
+        byte[] payload = readExact((int) length);
         return new Frame(opcode, payload);
     }
 
@@ -340,6 +360,9 @@ final class RomanVoiceStreamClient implements Closeable {
             int next = input.read();
             if (next < 0) {
                 throw new IOException("RomanVoice closed during handshake");
+            }
+            if (buffer.size() >= MAX_HTTP_HEADER_BYTES) {
+                throw new IOException("RomanVoice WebSocket handshake headers are too large");
             }
             buffer.write(next);
             matched = next == marker[matched] ? matched + 1 : 0;
@@ -372,6 +395,30 @@ final class RomanVoiceStreamClient implements Closeable {
         byte[] bytes = new byte[16];
         secureRandom.nextBytes(bytes);
         return Base64.encodeToString(bytes, Base64.NO_WRAP);
+    }
+
+    private String expectedWebSocketAccept(String key) throws IOException {
+        try {
+            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+            byte[] digest = sha1.digest(
+                    (key + WEBSOCKET_ACCEPT_GUID).getBytes(StandardCharsets.US_ASCII)
+            );
+            return Base64.encodeToString(digest, Base64.NO_WRAP);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IOException("SHA-1 is unavailable for WebSocket validation", exception);
+        }
+    }
+
+    private String responseHeaderValue(String response, String headerName) {
+        String[] lines = response.split("\r\n");
+        for (int index = 1; index < lines.length; index++) {
+            int separator = lines[index].indexOf(':');
+            if (separator > 0
+                    && headerName.equalsIgnoreCase(lines[index].substring(0, separator).trim())) {
+                return lines[index].substring(separator + 1).trim();
+            }
+        }
+        return "";
     }
 
     private String safeClientLabel() {

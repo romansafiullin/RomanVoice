@@ -26,6 +26,9 @@ def test_android_builds_share_single_version_metadata_source():
     assert '"--version-code", "1"' not in manual
     assert 'versionNameSuffix "-debug"' in gradle
     assert '"--debug-mode"' in manual
+    assert '"--min-sdk-version", "$MinSdk"' in manual
+    assert '"--min-api", "$MinSdk"' in manual
+    assert '"--min-api", "26"' not in manual
 
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "romanvoice-ci.yml").read_text(
         encoding="utf-8"

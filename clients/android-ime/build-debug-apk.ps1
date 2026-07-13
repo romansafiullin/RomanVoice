@@ -104,7 +104,7 @@ finally {
 
 Invoke-Checked $D8 @(
     "--lib", $PlatformJar,
-    "--min-api", "26",
+    "--min-api", "$MinSdk",
     "--output", $DexRoot,
     $ClassesJar
 )

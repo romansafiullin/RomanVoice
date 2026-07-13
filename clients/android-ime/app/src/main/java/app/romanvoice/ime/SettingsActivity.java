@@ -93,10 +93,26 @@ public class SettingsActivity extends Activity {
         Button saveButton = new Button(this);
         saveButton.setText("Save");
         saveButton.setOnClickListener(view -> {
+            String streamUrl = streamUrlField.getText().toString().trim();
+            String token = tokenField.getText().toString().trim();
+            if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
+                String message = RomanVoicePreferences.allowLanStream(this)
+                        ? "Use the provisioned Tailscale or private LAN RomanVoice URL"
+                        : "Use a Tailscale RomanVoice URL (100.64.0.0/10 or *.ts.net)";
+                streamUrlField.setError(message);
+                streamUrlField.requestFocus();
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (token.isEmpty()) {
+                tokenField.setError("RomanVoice token is required");
+                tokenField.requestFocus();
+                return;
+            }
             RomanVoicePreferences.save(
                     this,
-                    streamUrlField.getText().toString(),
-                    tokenField.getText().toString(),
+                    streamUrl,
+                    token,
                     polishSpinner.getSelectedItem().toString()
             );
             finish();

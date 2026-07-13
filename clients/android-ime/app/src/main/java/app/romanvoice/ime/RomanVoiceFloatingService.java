@@ -27,6 +27,9 @@ import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URL;
 
 public class RomanVoiceFloatingService extends AccessibilityService {
     private static final String TAG = "RomanVoiceFloat";
@@ -71,6 +74,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private volatile RomanVoiceStreamClient client;
     private volatile int sessionGeneration;
     private volatile int clientGeneration;
+    private volatile int verifiedConnectionGeneration = -1;
+    private volatile boolean idleHealthCheck;
+    private volatile String retryFailureNotice = "";
     private long lastTileToggleElapsedMs;
 
     private int insertionStart = 0;
@@ -115,6 +121,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         return service == null ? "" : service.failureNotice;
     }
 
+    static void requestHealthCheckForTile() {
+        RomanVoiceFloatingService service = activeService;
+        if (service != null && service.phase == RomanVoiceRecordingPhase.IDLE) {
+            service.checkIdleServiceHealth();
+        }
+    }
+
     static boolean requestToggleFromTile() {
         RomanVoiceFloatingService service = activeService;
         if (service == null) {
@@ -135,8 +148,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         activeService = this;
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         showOverlay();
-        setStatus("Ready");
-        notifyTileStateChanged();
+        checkIdleServiceHealth();
         startPhoneHeartbeat();
     }
 
@@ -310,9 +322,14 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void toggleRecording() {
-        if (isRecording()) {
+        if (idleHealthCheck) {
+            idleHealthCheck = false;
+            invalidateSession(RomanVoiceRecordingPhase.IDLE);
+            startRecording(true, TILE_FOCUS_RETRY_COUNT);
+        } else if (isRecording()) {
             stopRecording(true);
         } else if (phase == RomanVoiceRecordingPhase.ERROR) {
+            retryFailureNotice = failureNotice;
             failureNotice = "";
             invalidateSession(RomanVoiceRecordingPhase.IDLE);
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
@@ -322,12 +339,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void toggleRecordingFromTile() {
-        if (isRecording()) {
+        if (idleHealthCheck) {
+            idleHealthCheck = false;
+            invalidateSession(RomanVoiceRecordingPhase.IDLE);
+            startRecording(true, TILE_FOCUS_RETRY_COUNT);
+        } else if (isRecording()) {
             cancelTileFocusRetry();
             stopRecording(true);
         } else if (isBusyStartingOrFinishing()) {
             cancelRecording();
         } else if (phase == RomanVoiceRecordingPhase.ERROR) {
+            retryFailureNotice = failureNotice;
             failureNotice = "";
             invalidateSession(RomanVoiceRecordingPhase.IDLE);
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
@@ -367,6 +389,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             failPreflight("Set RomanVoice URL", "stream_url_missing", true);
             return;
         }
+        if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
+            cancelTileFocusRetry();
+            recycleNode(target);
+            failPreflight("Use the Tailscale RomanVoice URL", "stream_url_invalid", true);
+            return;
+        }
         if (token == null || token.trim().isEmpty()) {
             cancelTileFocusRetry();
             recycleNode(target);
@@ -393,6 +421,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                         new StreamListener(generation)
                 );
                 streamClient.connect();
+                markConnectionVerified(generation);
                 streamClient.sendStart(SAMPLE_RATE, RomanVoicePreferences.polish(this));
                 if (!activateClientSession(generation, streamClient)) {
                     streamClient.close();
@@ -426,6 +455,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void failPreflight(String message, String event, boolean openSettingsPage) {
         invalidateSession(RomanVoiceRecordingPhase.ERROR);
+        retryFailureNotice = "";
         failureNotice = message;
         setRecordingControls(false);
         showFailureNotice(message);
@@ -434,6 +464,83 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (openSettingsPage) {
             openSettings();
         }
+    }
+
+    private void checkIdleServiceHealth() {
+        if (phase != RomanVoiceRecordingPhase.IDLE) {
+            return;
+        }
+        String streamUrl = RomanVoicePreferences.streamUrl(this);
+        String token = RomanVoicePreferences.token(this);
+        if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
+            failPreflight("Use the Tailscale RomanVoice URL", "idle_stream_url_invalid", false);
+            return;
+        }
+        if (token == null || token.trim().isEmpty()) {
+            failPreflight("Set RomanVoice token", "idle_service_token_missing", false);
+            return;
+        }
+
+        idleHealthCheck = true;
+        int generation = beginSession();
+        setStatus("Checking RomanVoice");
+        setPillColor(PILL_COLOR_CONNECTING);
+        notifyTileStateChanged();
+
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            String failure = null;
+            try {
+                URI uri = URI.create(streamUrl);
+                String scheme = "wss".equalsIgnoreCase(uri.getScheme()) ? "https" : "http";
+                StringBuilder healthUrl = new StringBuilder();
+                healthUrl.append(scheme).append("://").append(uri.getHost());
+                if (uri.getPort() >= 0) {
+                    healthUrl.append(":").append(uri.getPort());
+                }
+                healthUrl.append("/v1/health");
+
+                connection = (HttpURLConnection) new URL(healthUrl.toString()).openConnection();
+                connection.setConnectTimeout(2000);
+                connection.setReadTimeout(2000);
+                connection.setRequestProperty("Authorization", "Bearer " + token.trim());
+                connection.setRequestProperty("X-RomanVoice-Client", "android-floating-health");
+                int code = connection.getResponseCode();
+                if (code == 401 || code == 403) {
+                    failure = RomanVoiceConnectionMessage.AUTH_FAILED;
+                } else if (code != 200) {
+                    failure = "RomanVoice unavailable (HTTP " + code + ")";
+                }
+            } catch (Exception exception) {
+                failure = RomanVoiceConnectionMessage.from(exception);
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+
+            String finalFailure = failure;
+            mainHandler.post(() -> {
+                if (finalFailure == null) {
+                    if (!completeSession(generation, RomanVoiceRecordingPhase.IDLE)) {
+                        return;
+                    }
+                    idleHealthCheck = false;
+                    retryFailureNotice = "";
+                    failureNotice = "";
+                    boolean keepOverlayHidden = overlayView == null
+                            || overlayView.getVisibility() != View.VISIBLE;
+                    setRecordingControls(false);
+                    if (keepOverlayHidden && overlayView != null) {
+                        overlayView.setVisibility(View.GONE);
+                    }
+                    notifyTileStateChanged();
+                    reportPhoneHeartbeat("ready");
+                } else if (isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+                    handleStreamError(generation, finalFailure, "idle_health_failed");
+                }
+            });
+        }, "RomanVoiceFloatHealth").start();
     }
 
     private void scheduleTileFocusRetry(int retriesRemaining) {
@@ -612,19 +719,33 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void cancelRecording() {
         cancelTileFocusRetry();
+        boolean canceledHealthCheck = idleHealthCheck;
+        idleHealthCheck = false;
+        boolean canceledUnverifiedRetry = !canceledHealthCheck
+                && phase == RomanVoiceRecordingPhase.CONNECTING
+                && verifiedConnectionGeneration != sessionGeneration
+                && !retryFailureNotice.isEmpty();
+        String restoredFailure = retryFailureNotice;
         boolean hadClient = client != null;
         boolean wasBusy = phase == RomanVoiceRecordingPhase.CONNECTING
                 || phase == RomanVoiceRecordingPhase.RECORDING
                 || phase == RomanVoiceRecordingPhase.FINISHING;
-        invalidateSession(RomanVoiceRecordingPhase.IDLE);
+        invalidateSession(canceledHealthCheck || canceledUnverifiedRetry
+                ? RomanVoiceRecordingPhase.ERROR
+                : RomanVoiceRecordingPhase.IDLE);
         stopAudioRecord();
         removeLiveDictationText();
         cleanupClient();
         setRecordingControls(false);
         setPillColor(PILL_COLOR_IDLE);
         resetLiveDictationState();
-        failureNotice = "";
-        if (wasBusy || hadClient) {
+        retryFailureNotice = "";
+        failureNotice = canceledHealthCheck
+                ? "Connection check canceled - tap to retry"
+                : (canceledUnverifiedRetry ? restoredFailure : "");
+        if (canceledHealthCheck || canceledUnverifiedRetry) {
+            showFailureNotice(failureNotice);
+        } else if (wasBusy || hadClient) {
             setStatus("Canceled");
         } else {
             setStatus("Ready");
@@ -698,6 +819,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (!completeSession(generation, RomanVoiceRecordingPhase.ERROR)) {
             return;
         }
+        idleHealthCheck = false;
+        retryFailureNotice = "";
+        verifiedConnectionGeneration = -1;
         stopAudioRecord();
         cleanupClient(generation);
         failureNotice = message == null || message.isEmpty()
@@ -892,17 +1016,14 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private boolean isKnownPlaceholder(AccessibilityNodeInfo node, String value) {
         String normalized = value.trim();
-        if ("RCS message".equalsIgnoreCase(normalized)) {
-            return true;
-        }
-
         CharSequence packageName = node.getPackageName();
         if (packageName == null
                 || !"com.google.android.apps.messaging".contentEquals(packageName)) {
             return false;
         }
 
-        return "Text message".equalsIgnoreCase(normalized)
+        return "RCS message".equalsIgnoreCase(normalized)
+                || "Text message".equalsIgnoreCase(normalized)
                 || "Message".equalsIgnoreCase(normalized);
     }
 
@@ -1032,6 +1153,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         client = streamClient;
         clientGeneration = generation;
         return true;
+    }
+
+    private synchronized void markConnectionVerified(int generation) {
+        if (isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+            verifiedConnectionGeneration = generation;
+            retryFailureNotice = "";
+        }
     }
 
     private synchronized boolean completeSession(
@@ -1204,7 +1332,11 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         phoneHeartbeatRunnable = new Runnable() {
             @Override
             public void run() {
-                reportPhoneHeartbeat("heartbeat");
+                if (phase == RomanVoiceRecordingPhase.IDLE) {
+                    checkIdleServiceHealth();
+                } else {
+                    reportPhoneHeartbeat("heartbeat");
+                }
                 mainHandler.postDelayed(this, PHONE_HEARTBEAT_INTERVAL_MS);
             }
         };
@@ -1219,7 +1351,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void reportPhoneHeartbeat(String event) {
-        reportPhoneHeartbeat(event, phase != RomanVoiceRecordingPhase.ERROR);
+        reportPhoneHeartbeat(
+                event,
+                phase == RomanVoiceRecordingPhase.IDLE
+                        || phase == RomanVoiceRecordingPhase.RECORDING
+                        || phase == RomanVoiceRecordingPhase.FINISHING
+        );
     }
 
     private void reportPhoneHeartbeat(String event, boolean available) {

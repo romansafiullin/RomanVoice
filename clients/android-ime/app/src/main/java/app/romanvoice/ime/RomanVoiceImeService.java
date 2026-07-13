@@ -221,6 +221,13 @@ public class RomanVoiceImeService extends InputMethodService {
             openSettings();
             return;
         }
+        if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
+            invalidateSession(RomanVoiceRecordingPhase.ERROR);
+            setRecordingControls(false);
+            setStatus("Use the Tailscale RomanVoice URL");
+            openSettings();
+            return;
+        }
         if (token == null || token.trim().isEmpty()) {
             invalidateSession(RomanVoiceRecordingPhase.ERROR);
             setRecordingControls(false);
@@ -607,34 +614,59 @@ public class RomanVoiceImeService extends InputMethodService {
         if (phase != RomanVoiceRecordingPhase.IDLE) {
             return;
         }
+        String streamUrl = RomanVoicePreferences.streamUrl(this);
+        String token = RomanVoicePreferences.token(this);
+        if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
+            invalidateSession(RomanVoiceRecordingPhase.ERROR);
+            setRecordingControls(false);
+            setStatus("Use the Tailscale RomanVoice URL");
+            return;
+        }
+        if (token == null || token.trim().isEmpty()) {
+            invalidateSession(RomanVoiceRecordingPhase.ERROR);
+            setRecordingControls(false);
+            setStatus("Set RomanVoice token");
+            return;
+        }
         setStatus("Checking RomanVoice");
         int generation = sessionGeneration;
         new Thread(() -> {
             String message;
+            boolean healthy = false;
+            HttpURLConnection connection = null;
             try {
-                String healthUrl = streamUrlToHealthUrl(RomanVoicePreferences.streamUrl(this));
+                String healthUrl = streamUrlToHealthUrl(streamUrl);
                 Log.i(TAG, "Checking RomanVoice health: " + healthUrl);
-                HttpURLConnection connection = (HttpURLConnection) new URL(healthUrl).openConnection();
+                connection = (HttpURLConnection) new URL(healthUrl).openConnection();
                 connection.setConnectTimeout(1500);
                 connection.setReadTimeout(1500);
-                connection.setRequestProperty("Authorization", "Bearer " + RomanVoicePreferences.token(this));
+                connection.setRequestProperty("Authorization", "Bearer " + token.trim());
                 connection.setRequestProperty("X-RomanVoice-Client", "android-ime-health");
                 int code = connection.getResponseCode();
                 if (code == 200) {
                     message = "Ready";
+                    healthy = true;
                 } else if (code == 401 || code == 403) {
                     message = RomanVoiceConnectionMessage.AUTH_FAILED;
                 } else {
                     message = "RomanVoice unavailable (HTTP " + code + ")";
                 }
-                connection.disconnect();
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice health check failed", exception);
                 message = RomanVoiceConnectionMessage.from(exception);
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
             }
             String finalMessage = message;
+            boolean finalHealthy = healthy;
             mainHandler.post(() -> {
                 if (generation == sessionGeneration && phase == RomanVoiceRecordingPhase.IDLE) {
+                    if (!finalHealthy) {
+                        invalidateSession(RomanVoiceRecordingPhase.ERROR);
+                        setRecordingControls(false);
+                    }
                     setStatus(finalMessage);
                 }
             });

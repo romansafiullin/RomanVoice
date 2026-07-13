@@ -12,6 +12,14 @@ $ErrorActionPreference = 'Stop'
 $PackageName = 'app.romanvoice.ime'
 $TailscalePackageName = 'com.tailscale.ipn'
 $PreferencesPath = 'shared_prefs/romanvoice_ime.xml'
+$RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$VersionPropertiesPath = Join-Path $RepositoryRoot 'clients\android-ime\version.properties'
+if (-not (Test-Path -LiteralPath $VersionPropertiesPath)) {
+    throw "Android version metadata is missing: $VersionPropertiesPath"
+}
+$VersionProperties = ConvertFrom-StringData (Get-Content -Raw -LiteralPath $VersionPropertiesPath)
+$ExpectedVersionCode = [string][int]$VersionProperties.versionCode
+$ExpectedVersionName = "$($VersionProperties.versionName)-debug"
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Add-Failure {
@@ -117,6 +125,29 @@ function Get-PreferenceValue {
             Select-Object -First 1
         if ($node) {
             return [string]$node.InnerText
+        }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
+function Get-PreferenceBooleanValue {
+    param(
+        [string]$XmlText,
+        [string]$Name
+    )
+
+    if (-not $XmlText) {
+        return ""
+    }
+    try {
+        [xml]$document = $XmlText
+        $node = @($document.map.boolean) |
+            Where-Object { $_.name -eq $Name } |
+            Select-Object -First 1
+        if ($node) {
+            return ([string]$node.value).ToLowerInvariant()
         }
     } catch {
         return ""
@@ -263,8 +294,23 @@ if (-not (Test-Path $adb)) {
         Write-Pass "Authorized Android device is connected over ADB."
 
         $packagePath = (& $adb shell pm path $PackageName).Trim()
+        $packageDump = @()
         if ($packagePath -like 'package:*') {
             Write-Pass "RomanVoice Android package is installed."
+            $packageDump = @(& $adb shell dumpsys package $PackageName)
+            $packageDumpText = $packageDump -join "`n"
+            $versionCodeMatch = [regex]::Match($packageDumpText, '(?m)^\s*versionCode=(\d+)\b')
+            $versionNameMatch = [regex]::Match($packageDumpText, '(?m)^\s*versionName=([^\s]+)\s*$')
+            $installedVersionCode = if ($versionCodeMatch.Success) { $versionCodeMatch.Groups[1].Value } else { '' }
+            $installedVersionName = if ($versionNameMatch.Success) { $versionNameMatch.Groups[1].Value } else { '' }
+            if (
+                $installedVersionCode -eq $ExpectedVersionCode -and
+                $installedVersionName -eq $ExpectedVersionName
+            ) {
+                Write-Pass "RomanVoice Android build identity matches $ExpectedVersionName ($ExpectedVersionCode)."
+            } else {
+                Add-Failure "RomanVoice Android build is stale or unexpected: installed=$installedVersionName ($installedVersionCode), expected=$ExpectedVersionName ($ExpectedVersionCode)."
+            }
         } else {
             Add-Failure "RomanVoice Android package is not installed."
         }
@@ -278,7 +324,6 @@ if (-not (Test-Path $adb)) {
             Add-Failure "RomanVoice Floating Mic accessibility service is not enabled; the Quick Settings tile will be unavailable/dark."
         }
 
-        $packageDump = (& $adb shell dumpsys package $PackageName)
         if (($packageDump -join "`n") -match 'android\.permission\.RECORD_AUDIO:\s+granted=true') {
             Write-Pass "RomanVoice Android microphone permission is granted."
         } else {
@@ -297,14 +342,22 @@ if (-not (Test-Path $adb)) {
         $prefsText = ($prefs -join "`n").Trim()
         $streamUrl = Get-PreferenceValue $prefsText 'stream_url'
         $phoneToken = Get-PreferenceValue $prefsText 'token'
+        $allowLanStream = Get-PreferenceBooleanValue $prefsText 'allow_lan_stream'
         $streamUri = ConvertTo-RomanVoiceStreamUri $streamUrl
 
         if ($null -eq $streamUri) {
             Add-Failure "Could not read a valid RomanVoice Android stream URL from app preferences."
         } elseif (Test-TailscaleHost $streamUri.DnsSafeHost) {
             Write-Pass "RomanVoice Android uses a Tailscale stream endpoint: $streamUrl"
+            if ($allowLanStream -ne 'false') {
+                Add-Failure "RomanVoice Android LAN developer override is not explicitly disabled; reinstall with the current Tailscale provisioning path."
+            }
         } elseif ((Test-PrivateLanHost $streamUri.DnsSafeHost) -and $AllowLanOnly) {
-            Write-Warning "RomanVoice Android is intentionally in LAN-only mode: $streamUrl"
+            if ($allowLanStream -eq 'true') {
+                Write-Warning "RomanVoice Android is intentionally in LAN-only mode: $streamUrl"
+            } else {
+                Add-Failure "RomanVoice Android has a LAN URL without the installer-only LAN override; the app will reject this endpoint."
+            }
         } elseif (Test-PrivateLanHost $streamUri.DnsSafeHost) {
             Add-Failure "RomanVoice Android is configured for LAN only ($streamUrl). Reinstall with Tailscale, or pass -AllowLanOnly for an intentional home-only check."
         } else {
