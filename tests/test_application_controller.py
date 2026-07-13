@@ -109,6 +109,7 @@ class FakeRecorder:
         self.streaming_callback = None
         self.cleaned_up = False
         self.duration = 12.5
+        self.rate = 16000
 
     def set_audio_level_callback(self, callback):
         self.audio_level_callback = callback
@@ -165,6 +166,21 @@ class FakeHotkeyManager:
 
     def cleanup(self):
         self.cleaned_up = True
+
+
+class FakeDictationService:
+    """Keep controller unit tests from binding the live RomanVoice port."""
+
+    def __init__(self, controller):
+        self.controller = controller
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
 
 
 class FakeLocalBackend:
@@ -504,6 +520,9 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
         close=lambda: db_state.__setitem__("closed", True)
     )
 
+    dictation_service_module = types.ModuleType("services.dictation_service")
+    dictation_service_module.RomanVoiceDictationService = FakeDictationService
+
     keyboard_module = types.ModuleType("keyboard")
     keyboard_module.send = keyboard.send
 
@@ -524,6 +543,7 @@ def _install_module_stubs(settings_manager, history_manager, audio_processor, ke
         "services.audio_processor": audio_processor_module,
         "services.streaming_transcriber": streaming_module,
         "services.database": database_module,
+        "services.dictation_service": dictation_service_module,
         "keyboard": keyboard_module,
         "pyperclip": pyperclip_module,
         "services.text_injector": text_injector_module,

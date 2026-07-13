@@ -328,7 +328,7 @@ if (-not (Test-Path $adb)) {
         $connectivityLines = @(& $adb shell dumpsys connectivity 2>$null)
         $activeVpnNetworks = @(
             $connectivityLines | Where-Object {
-                $_ -match '^\s*NetworkAgentInfo\{' -and $_ -match 'Transports:\s+VPN(?:\s|\])'
+                $_ -match '^\s*NetworkAgentInfo\{' -and $_ -match 'Transports:\s+.*\bVPN\b'
             }
         )
         $activeVpn = $activeVpnNetworks.Count -gt 0

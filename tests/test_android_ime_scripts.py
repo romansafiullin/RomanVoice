@@ -105,7 +105,7 @@ def test_phone_tile_health_rejects_implicit_lan_and_probes_tailscale_path():
     assert "$TailscalePackageName = 'com.tailscale.ipn'" in script
     assert "pidof $TailscalePackageName" in script
     assert "dumpsys connectivity" in script
-    assert "Transports:\\s+VPN" in script
+    assert "Transports:\\s+.*\\bVPN\\b" in script
     assert "always_on_vpn_app" in script
     assert "function Invoke-PhoneWebSocketProbe" in script
     assert "toybox nc" in script
