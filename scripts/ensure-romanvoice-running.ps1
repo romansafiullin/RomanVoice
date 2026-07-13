@@ -5,19 +5,27 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$commonScript = Join-Path $PSScriptRoot 'romanvoice-watchdog-common.ps1'
+. $commonScript
 $logDir = Join-Path $env:LOCALAPPDATA 'RomanVoice'
 $logFile = Join-Path $logDir 'startup-watchdog.log'
+$healthFailureFile = Join-Path $logDir 'startup-health-failures.txt'
 
 function Write-WatchdogLog {
     param([string]$Message)
 
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line = "$timestamp $Message"
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    Add-Content -Path $logFile -Value $line -Encoding UTF8
-    if (-not $Quiet) {
-        Write-Host $line
-    }
+    Write-RomanVoiceWatchdogLog -Path $logFile -Message $Message -Quiet:$Quiet
+}
+
+$ensureMutex = [Threading.Mutex]::new($false, 'Local\RomanVoiceEnsureRunning')
+try {
+    $ownsEnsureMutex = $ensureMutex.WaitOne([TimeSpan]::FromSeconds(10))
+} catch [Threading.AbandonedMutexException] {
+    $ownsEnsureMutex = $true
+}
+if (-not $ownsEnsureMutex) {
+    Write-WatchdogLog 'Another RomanVoice startup check is still running; skipping duplicate check.'
+    exit 0
 }
 
 function Get-RomanVoiceProcess {
@@ -39,6 +47,52 @@ function Get-ServicePortOwner {
     } catch {
         @()
     }
+}
+
+function Test-AuthenticatedServiceHealth {
+    param([int]$Port)
+
+    $token = [string]$env:ROMANVOICE_SERVICE_TOKEN
+    if (-not $token) {
+        $tokenFile = if ($env:ROMANVOICE_SERVICE_TOKEN_FILE) {
+            $env:ROMANVOICE_SERVICE_TOKEN_FILE
+        } else {
+            Join-Path $env:APPDATA 'RomanVoice\service_token.txt'
+        }
+        if (Test-Path -LiteralPath $tokenFile) {
+            $token = (Get-Content -Raw -LiteralPath $tokenFile).Trim()
+        }
+    }
+    if (-not $token) {
+        return $false
+    }
+
+    try {
+        $response = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:$Port/v1/health" `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -TimeoutSec 3 `
+            -Method Get
+        return [bool]$response.ok
+    } catch {
+        return $false
+    }
+}
+
+function Register-HealthFailure {
+    $count = 0
+    if (Test-Path -LiteralPath $healthFailureFile) {
+        $raw = (Get-Content -Raw -LiteralPath $healthFailureFile).Trim()
+        [void][int]::TryParse($raw, [ref]$count)
+    }
+    $count++
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    Set-Content -LiteralPath $healthFailureFile -Value $count -Encoding ASCII
+    return $count
+}
+
+function Reset-HealthFailures {
+    Remove-Item -LiteralPath $healthFailureFile -Force -ErrorAction SilentlyContinue
 }
 
 function Test-PreferredRomanVoiceProcess {
@@ -75,13 +129,31 @@ if ($serviceOwners.Count -gt 0) {
     $ownerPid = [int]$serviceOwners[0]
     $owner = $running | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
     if ($owner -and (Test-PreferredRomanVoiceProcess -Process $owner -PreferredPythonw $venvPythonw)) {
-        Write-WatchdogLog "RomanVoice already running (pid=$ownerPid, owns port=$servicePort)."
-        exit 0
+        if (Test-AuthenticatedServiceHealth -Port $servicePort) {
+            Reset-HealthFailures
+            Write-WatchdogLog "RomanVoice healthy (pid=$ownerPid, authenticated port=$servicePort)."
+            exit 0
+        }
+
+        $failureCount = Register-HealthFailure
+        if ($failureCount -lt 3) {
+            Write-WatchdogLog "RomanVoice pid=$ownerPid owns port=$servicePort but authenticated health failed ($failureCount/3); waiting before restart."
+            exit 3
+        }
+
+        Write-WatchdogLog "RomanVoice pid=$ownerPid failed authenticated health 3 times; restarting owned process."
+        Stop-Process -Id $ownerPid -Force -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        Reset-HealthFailures
+        $running = @(Get-RomanVoiceProcess)
+        $serviceOwners = @(Get-ServicePortOwner -Port $servicePort)
     }
 
-    $ownerExecutable = if ($owner) { [string]$owner.ExecutablePath } else { "unknown executable" }
-    Write-WatchdogLog "RomanVoice service port $servicePort owned by non-preferred pid=$ownerPid ($ownerExecutable); expected $venvPythonw."
-    exit 0
+    if ($serviceOwners.Count -gt 0) {
+        $ownerExecutable = if ($owner) { [string]$owner.ExecutablePath } else { "unknown executable" }
+        Write-WatchdogLog "RomanVoice service port $servicePort owned by non-preferred pid=$ownerPid ($ownerExecutable); expected $venvPythonw."
+        exit 0
+    }
 }
 
 $preferredRunning = @(
