@@ -63,15 +63,27 @@ def test_text_range_helper_does_not_relocate_short_common_text(tmp_path):
                         19,
                         33
                     );
-                    assertRange(
+                    assertNull(
                         RomanVoiceTextRange.findLiveDictationRange(
                             "prefix changed phrase suffix",
                             7,
                             21,
                             "dictated words"
-                        ),
-                        7,
-                        21
+                        )
+                    );
+                    assertTrue(RomanVoiceTextRange.hasExpectedContent("same", "same"));
+                    assertFalse(RomanVoiceTextRange.hasExpectedContent("changed", "same"));
+                    assertEquals(
+                        "best partial",
+                        RomanVoiceTextRange.chooseFinalText("", "best partial")
+                    );
+                    assertEquals(
+                        "best partial",
+                        RomanVoiceTextRange.chooseFinalText("   ", "best partial")
+                    );
+                    assertEquals(
+                        "final text",
+                        RomanVoiceTextRange.chooseFinalText("final text", "best partial")
                     );
                 }
 
@@ -84,6 +96,24 @@ def test_text_range_helper_does_not_relocate_short_common_text(tmp_path):
                 private static void assertNull(int[] range) {
                     if (range != null) {
                         throw new AssertionError("expected null");
+                    }
+                }
+
+                private static void assertTrue(boolean value) {
+                    if (!value) {
+                        throw new AssertionError("expected true");
+                    }
+                }
+
+                private static void assertFalse(boolean value) {
+                    if (value) {
+                        throw new AssertionError("expected false");
+                    }
+                }
+
+                private static void assertEquals(String expected, String actual) {
+                    if (!expected.equals(actual)) {
+                        throw new AssertionError("text mismatch");
                     }
                 }
             }

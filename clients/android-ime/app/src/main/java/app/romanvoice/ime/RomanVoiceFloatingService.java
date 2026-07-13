@@ -36,7 +36,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final int PILL_COLOR_RECORDING = 0xEEC8372D;
     private static final int PILL_COLOR_RECORDED = 0xEE2F7D4C;
     private static final int PILL_COLOR_ERROR = 0xEE7A3129;
-    private static final boolean SHOW_CANCEL_BUTTON = false;
     private static final int TILE_FOCUS_RETRY_COUNT = 8;
     private static final long TILE_FOCUS_RETRY_DELAY_MS = 150;
     private static final long IDLE_NOTICE_VISIBLE_MS = 1800;
@@ -45,9 +44,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private static final long CONNECTING_TIMEOUT_MS = 10000;
     private static final long STOP_SEND_TIMEOUT_MS = 10000;
     private static final long FINAL_RESULT_TIMEOUT_MS = 90000;
-    private static final long ERROR_RESET_MS = 3000;
     private static final long TILE_TOGGLE_DEBOUNCE_MS = 750;
-    private static final String CONNECTION_FAILED_NOTICE = "No PC connection - check Wi-Fi/VPN";
+    private static final long THREAD_JOIN_TIMEOUT_MS = 750;
+    private static final String CONNECTION_FAILED_NOTICE =
+            RomanVoiceConnectionMessage.NETWORK_FAILED;
 
     private static volatile RomanVoiceFloatingService activeService;
 
@@ -64,17 +64,22 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private Runnable connectingTimeoutRunnable;
     private Runnable stopSendTimeoutRunnable;
     private Runnable finalResultTimeoutRunnable;
-    private Runnable errorResetRunnable;
 
     private volatile RomanVoiceRecordingPhase phase = RomanVoiceRecordingPhase.IDLE;
     private volatile AudioRecord audioRecord;
-    private Thread audioThread;
+    private volatile Thread audioThread;
     private volatile RomanVoiceStreamClient client;
+    private volatile int sessionGeneration;
+    private volatile int clientGeneration;
     private long lastTileToggleElapsedMs;
 
     private int insertionStart = 0;
     private int insertionEnd = 0;
     private String lastDictationText = "";
+    private String bestPartialText = "";
+    private String expectedFieldText = "";
+    private String targetFingerprint = "";
+    private volatile String failureNotice = "";
 
     static boolean isAvailableForTile() {
         return activeService != null;
@@ -99,7 +104,15 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (service.phase == RomanVoiceRecordingPhase.FINISHING) {
             return TileState.FINISHING;
         }
+        if (service.phase == RomanVoiceRecordingPhase.ERROR) {
+            return TileState.ERROR;
+        }
         return TileState.READY;
+    }
+
+    static String getTileFailureForTile() {
+        RomanVoiceFloatingService service = activeService;
+        return service == null ? "" : service.failureNotice;
     }
 
     static boolean requestToggleFromTile() {
@@ -237,8 +250,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         } else if (nextPhase == RomanVoiceRecordingPhase.FINISHING) {
             scheduleStopSendTimeout();
             scheduleFinalResultTimeout();
-        } else if (nextPhase == RomanVoiceRecordingPhase.ERROR) {
-            scheduleErrorReset();
         }
     }
 
@@ -254,10 +265,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (finalResultTimeoutRunnable != null) {
             mainHandler.removeCallbacks(finalResultTimeoutRunnable);
             finalResultTimeoutRunnable = null;
-        }
-        if (errorResetRunnable != null) {
-            mainHandler.removeCallbacks(errorResetRunnable);
-            errorResetRunnable = null;
         }
     }
 
@@ -298,34 +305,16 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
     }
 
-    private void scheduleErrorReset() {
-        errorResetRunnable = () -> {
-            errorResetRunnable = null;
-            if (phase == RomanVoiceRecordingPhase.ERROR) {
-                setPhase(RomanVoiceRecordingPhase.IDLE);
-                setRecordingControls(false);
-                notifyTileStateChanged();
-                reportPhoneHeartbeat("ready");
-            }
-        };
-        mainHandler.postDelayed(errorResetRunnable, ERROR_RESET_MS);
-    }
-
     private void handlePhaseTimeout(String message, String event) {
-        setPhase(RomanVoiceRecordingPhase.ERROR);
-        stopAudioRecord();
-        cleanupClient();
-        setRecordingControls(false);
-        showFailureNotice(message);
-        notifyTileStateChanged();
-        reportPhoneHeartbeat(event);
+        handleStreamError(sessionGeneration, message, event);
     }
 
     private void toggleRecording() {
         if (isRecording()) {
             stopRecording(true);
         } else if (phase == RomanVoiceRecordingPhase.ERROR) {
-            setPhase(RomanVoiceRecordingPhase.IDLE);
+            failureNotice = "";
+            invalidateSession(RomanVoiceRecordingPhase.IDLE);
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
         } else if (!isBusyStartingOrFinishing()) {
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
@@ -336,8 +325,11 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (isRecording()) {
             cancelTileFocusRetry();
             stopRecording(true);
+        } else if (isBusyStartingOrFinishing()) {
+            cancelRecording();
         } else if (phase == RomanVoiceRecordingPhase.ERROR) {
-            setPhase(RomanVoiceRecordingPhase.IDLE);
+            failureNotice = "";
+            invalidateSession(RomanVoiceRecordingPhase.IDLE);
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
         } else if (!isBusyStartingOrFinishing()) {
             startRecording(true, TILE_FOCUS_RETRY_COUNT);
@@ -351,8 +343,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         cancelIdleOverlayHide();
         if (!hasRecordPermission()) {
             cancelTileFocusRetry();
-            showIdleNotice("Grant mic");
-            openSettings();
+            failPreflight("Microphone permission needed", "microphone_permission", true);
             return;
         }
 
@@ -364,57 +355,54 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             }
             Log.i(TAG, "Tile/start ignored: no focused editable field");
             cancelTileFocusRetry();
-            showIdleNotice("Tap a text field first");
+            failPreflight("Tap a text field first", "focused_field_missing", false);
+            return;
+        }
+
+        String streamUrl = RomanVoicePreferences.streamUrl(this);
+        String token = RomanVoicePreferences.token(this);
+        if (streamUrl == null || streamUrl.trim().isEmpty() || RomanVoicePreferences.isDefaultStreamUrl(streamUrl)) {
+            cancelTileFocusRetry();
+            recycleNode(target);
+            failPreflight("Set RomanVoice URL", "stream_url_missing", true);
+            return;
+        }
+        if (token == null || token.trim().isEmpty()) {
+            cancelTileFocusRetry();
+            recycleNode(target);
+            failPreflight("Set RomanVoice token", "service_token_missing", true);
             return;
         }
         cancelTileFocusRetry();
         captureInsertionState(target);
         recycleNode(target);
 
-        String streamUrl = RomanVoicePreferences.streamUrl(this);
-        String token = RomanVoicePreferences.token(this);
-        if (streamUrl == null || streamUrl.trim().isEmpty() || RomanVoicePreferences.isDefaultStreamUrl(streamUrl)) {
-            cancelTileFocusRetry();
-            showIdleNotice("Set URL");
-            openSettings();
-            return;
-        }
-        if (token == null || token.trim().isEmpty()) {
-            cancelTileFocusRetry();
-            showIdleNotice("Set token");
-            openSettings();
-            return;
-        }
-
-        setPhase(RomanVoiceRecordingPhase.CONNECTING);
+        int generation = beginSession();
         notifyTileStateChanged();
         reportPhoneHeartbeat("connecting");
-        setStatus("Connecting");
-        setPillState(PILL_COLOR_CONNECTING, true);
-        micButton.setEnabled(false);
-        setOverlayClickTargetsEnabled(false);
-        if (cancelButton != null) {
-            cancelButton.setVisibility(View.GONE);
-        }
+        setBusyControls("Connecting", PILL_COLOR_CONNECTING);
 
         new Thread(() -> {
+            RomanVoiceStreamClient streamClient = null;
             try {
                 Log.i(TAG, "Connecting to RomanVoice stream: " + streamUrl);
-                RomanVoiceStreamClient streamClient = new RomanVoiceStreamClient(
+                streamClient = new RomanVoiceStreamClient(
                         streamUrl,
                         token,
-                        new StreamListener()
+                        "android-floating",
+                        new StreamListener(generation)
                 );
                 streamClient.connect();
                 streamClient.sendStart(SAMPLE_RATE, RomanVoicePreferences.polish(this));
-                if (phase != RomanVoiceRecordingPhase.CONNECTING) {
+                if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
                     streamClient.close();
                     return;
                 }
                 client = streamClient;
-                startAudioPump();
+                clientGeneration = generation;
+                startAudioPump(generation, streamClient);
                 mainHandler.post(() -> {
-                    if (phase == RomanVoiceRecordingPhase.RECORDING) {
+                    if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
                         setRecordingControls(true);
                         notifyTileStateChanged();
                         reportPhoneHeartbeat("recording");
@@ -422,16 +410,32 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 });
             } catch (Exception exception) {
                 Log.w(TAG, "RomanVoice floating connection failed", exception);
-                cleanupClient();
+                if (streamClient != null) {
+                    streamClient.close();
+                }
                 mainHandler.post(() -> {
-                    setPhase(RomanVoiceRecordingPhase.ERROR);
-                    setRecordingControls(false);
-                    showFailureNotice(CONNECTION_FAILED_NOTICE);
-                    notifyTileStateChanged();
-                    reportPhoneHeartbeat("connection_failed");
+                    if (isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+                        handleStreamError(
+                                generation,
+                                RomanVoiceConnectionMessage.from(exception),
+                                "connection_failed"
+                        );
+                    }
                 });
             }
         }, "RomanVoiceFloatConnect").start();
+    }
+
+    private void failPreflight(String message, String event, boolean openSettingsPage) {
+        invalidateSession(RomanVoiceRecordingPhase.ERROR);
+        failureNotice = message;
+        setRecordingControls(false);
+        showFailureNotice(message);
+        notifyTileStateChanged();
+        reportPhoneHeartbeat(event, false);
+        if (openSettingsPage) {
+            openSettings();
+        }
     }
 
     private void scheduleTileFocusRetry(int retriesRemaining) {
@@ -456,31 +460,51 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
     }
 
-    private void startAudioPump() throws IOException {
+    private void startAudioPump(
+            int generation,
+            RomanVoiceStreamClient streamClient
+    ) throws IOException {
         int minBuffer = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
         );
         int bufferSize = Math.max(minBuffer, SAMPLE_RATE / 5 * 2);
-        audioRecord = new AudioRecord(
+        AudioRecord nextRecord = new AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 bufferSize * 2
         );
-        if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+        if (nextRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            nextRecord.release();
             throw new IOException("Microphone failed to initialize");
         }
 
-        audioRecord.startRecording();
-        setPhase(RomanVoiceRecordingPhase.RECORDING);
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+            nextRecord.release();
+            return;
+        }
+        try {
+            nextRecord.startRecording();
+        } catch (RuntimeException exception) {
+            nextRecord.release();
+            throw new IOException("Microphone failed to start", exception);
+        }
+        if (!activateAudioSession(generation, nextRecord)) {
+            try {
+                nextRecord.stop();
+            } catch (IllegalStateException ignored) {
+            }
+            nextRecord.release();
+            return;
+        }
         audioThread = new Thread(() -> {
             byte[] buffer = new byte[bufferSize];
-            while (phase == RomanVoiceRecordingPhase.RECORDING) {
+            while (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
                 AudioRecord record = audioRecord;
-                if (record == null) {
+                if (record == null || record != nextRecord) {
                     break;
                 }
                 int read;
@@ -488,20 +512,41 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     read = record.read(buffer, 0, buffer.length);
                 } catch (RuntimeException exception) {
                     Log.w(TAG, "Floating audio read failed", exception);
-                    mainHandler.post(() -> handleStreamError(shortError(exception)));
+                    mainHandler.post(() -> handleStreamError(
+                            generation,
+                            "Microphone stopped - try again",
+                            "audio_read_failed"
+                    ));
                     break;
                 }
-                RomanVoiceStreamClient streamClient = client;
-                if (read > 0 && streamClient != null) {
+                if (read < 0) {
+                    int errorCode = read;
+                    Log.w(TAG, "Floating audio read returned error " + errorCode);
+                    mainHandler.post(() -> handleStreamError(
+                            generation,
+                            "Microphone stopped - try again",
+                            "audio_read_failed"
+                    ));
+                    break;
+                }
+                if (read > 0) {
                     try {
                         streamClient.sendAudio(buffer, read);
                     } catch (IOException exception) {
                         Log.w(TAG, "Failed to send floating audio chunk", exception);
-                        mainHandler.post(() -> handleStreamError(shortError(exception)));
+                        mainHandler.post(() -> handleStreamError(
+                                generation,
+                                RomanVoiceConnectionMessage.from(exception),
+                                "audio_send_failed"
+                        ));
                         break;
                     } catch (RuntimeException exception) {
                         Log.w(TAG, "Floating audio pump failed", exception);
-                        mainHandler.post(() -> handleStreamError(shortError(exception)));
+                        mainHandler.post(() -> handleStreamError(
+                                generation,
+                                RomanVoiceConnectionMessage.from(exception),
+                                "audio_send_failed"
+                        ));
                         break;
                     }
                 }
@@ -513,59 +558,75 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void stopRecording(boolean requestFinal) {
         cancelTileFocusRetry();
         boolean wasRecording = isRecording();
-        stopAudioRecord();
+        int generation = sessionGeneration;
 
-        if (requestFinal && client != null) {
-            setPhase(RomanVoiceRecordingPhase.FINISHING);
+        if (requestFinal
+                && client != null
+                && clientGeneration == generation
+                && transitionSession(
+                        generation,
+                        RomanVoiceRecordingPhase.RECORDING,
+                        RomanVoiceRecordingPhase.FINISHING
+                )) {
+            stopAudioRecord();
             notifyTileStateChanged();
-            setStatus("Finishing");
-            cancelIdleOverlayHide();
-            setPillState(PILL_COLOR_RECORDED, true);
-            micButton.setEnabled(false);
-            setOverlayClickTargetsEnabled(false);
-            if (cancelButton != null) {
-                cancelButton.setVisibility(View.GONE);
-            }
+            setBusyControls("Finishing", PILL_COLOR_RECORDED);
             new Thread(() -> {
                 try {
                     RomanVoiceStreamClient streamClient = client;
-                    if (streamClient != null) {
+                    if (streamClient != null && clientGeneration == generation) {
                         streamClient.sendStop();
                     }
-                    mainHandler.post(this::cancelStopSendTimeout);
+                    mainHandler.post(() -> {
+                        if (isCurrentSession(generation, RomanVoiceRecordingPhase.FINISHING)) {
+                            cancelStopSendTimeout();
+                        }
+                    });
                 } catch (IOException exception) {
-                    mainHandler.post(() -> handleStreamError(shortError(exception)));
+                    mainHandler.post(() -> handleStreamError(
+                            generation,
+                            RomanVoiceConnectionMessage.from(exception),
+                            "stop_send_failed"
+                    ));
                 } catch (RuntimeException exception) {
-                    mainHandler.post(() -> handleStreamError(shortError(exception)));
+                    mainHandler.post(() -> handleStreamError(
+                            generation,
+                            RomanVoiceConnectionMessage.from(exception),
+                            "stop_send_failed"
+                    ));
                 }
             }, "RomanVoiceFloatStop").start();
         } else {
-            setPhase(RomanVoiceRecordingPhase.IDLE);
+            invalidateSession(RomanVoiceRecordingPhase.IDLE);
+            stopAudioRecord();
             notifyTileStateChanged();
             cleanupClient();
-            if (wasRecording) {
-                mainHandler.post(() -> {
-                    setRecordingControls(false);
-                    setStatus("Ready");
-                    notifyTileStateChanged();
+            mainHandler.post(() -> {
+                setRecordingControls(false);
+                setStatus("Ready");
+                notifyTileStateChanged();
+                if (wasRecording) {
                     reportPhoneHeartbeat("ready");
-                });
-            }
+                }
+            });
         }
     }
 
     private void cancelRecording() {
         cancelTileFocusRetry();
         boolean hadClient = client != null;
-        boolean wasRecording = isRecording();
-        setPhase(RomanVoiceRecordingPhase.IDLE);
+        boolean wasBusy = phase == RomanVoiceRecordingPhase.CONNECTING
+                || phase == RomanVoiceRecordingPhase.RECORDING
+                || phase == RomanVoiceRecordingPhase.FINISHING;
+        invalidateSession(RomanVoiceRecordingPhase.IDLE);
         stopAudioRecord();
         removeLiveDictationText();
         cleanupClient();
         setRecordingControls(false);
         setPillColor(PILL_COLOR_IDLE);
         resetLiveDictationState();
-        if (wasRecording || hadClient) {
+        failureNotice = "";
+        if (wasBusy || hadClient) {
             setStatus("Canceled");
         } else {
             setStatus("Ready");
@@ -577,34 +638,56 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void stopAudioRecord() {
         AudioRecord record = audioRecord;
         audioRecord = null;
+        Thread thread = audioThread;
+        audioThread = null;
         if (record != null) {
             try {
                 record.stop();
             } catch (IllegalStateException ignored) {
             }
+        }
+        if (thread != null && thread != Thread.currentThread()) {
+            thread.interrupt();
+            try {
+                thread.join(THREAD_JOIN_TIMEOUT_MS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (record != null) {
             record.release();
         }
     }
 
-    private void handlePartial(String text) {
-        if (phase != RomanVoiceRecordingPhase.RECORDING) {
+    private void handlePartial(int generation, String text) {
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
             return;
         }
         String next = text == null ? "" : text;
-        writeDictationText(next);
+        if (next.trim().isEmpty()) {
+            return;
+        }
+        if (writeDictationText(generation, next) && !next.isEmpty()) {
+            bestPartialText = next;
+        }
     }
 
-    private void handleFinal(String text) {
-        if (phase != RomanVoiceRecordingPhase.FINISHING) {
+    private void handleFinal(int generation, String text) {
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.FINISHING)) {
             return;
         }
         stopAudioRecord();
-        setPhase(RomanVoiceRecordingPhase.IDLE);
-        String finalText = text == null ? "" : text;
+        String finalText = RomanVoiceTextRange.chooseFinalText(text, bestPartialText);
         if (!finalText.equals(lastDictationText)) {
-            writeDictationText(finalText);
+            if (!writeDictationText(generation, finalText)) {
+                return;
+            }
         }
-        cleanupClient();
+        cleanupClient(generation);
+        if (!completeSession(generation, RomanVoiceRecordingPhase.IDLE)) {
+            return;
+        }
+        failureNotice = "";
         setRecordingControls(false);
         setStatus(finalText.isEmpty() ? "No speech" : "Ready");
         setPillColor(finalText.isEmpty() ? PILL_COLOR_ERROR : PILL_COLOR_RECORDED);
@@ -613,28 +696,46 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         reportPhoneHeartbeat("final");
     }
 
-    private void handleStreamError(String message) {
-        setPhase(RomanVoiceRecordingPhase.ERROR);
+    private void handleStreamError(int generation, String message, String event) {
+        if (!completeSession(generation, RomanVoiceRecordingPhase.ERROR)) {
+            return;
+        }
         stopAudioRecord();
-        cleanupClient();
+        cleanupClient(generation);
+        failureNotice = message == null || message.isEmpty()
+                ? CONNECTION_FAILED_NOTICE
+                : message;
         setRecordingControls(false);
-        showFailureNotice(
-                message == null || message.isEmpty() ? CONNECTION_FAILED_NOTICE : message
-        );
+        showFailureNotice(failureNotice);
         resetLiveDictationState();
         notifyTileStateChanged();
-        reportPhoneHeartbeat("stream_error");
+        reportPhoneHeartbeat(event, false);
     }
 
-    private void writeDictationText(String dictationText) {
+    private boolean writeDictationText(int generation, String dictationText) {
         AccessibilityNodeInfo target = findFocusedEditableNode();
         if (target == null) {
-            setStatus("Field lost");
-            return;
+            handleTargetSafetyFailure(generation, "Text field lost - dictation preserved");
+            return false;
+        }
+        if (!targetFingerprint.equals(fingerprint(target))) {
+            recycleNode(target);
+            handleTargetSafetyFailure(generation, "Text field changed - dictation preserved");
+            return false;
         }
 
         String currentText = getEditableText(target);
+        if (!RomanVoiceTextRange.hasExpectedContent(currentText, expectedFieldText)) {
+            recycleNode(target);
+            handleTargetSafetyFailure(generation, "Text changed - dictation preserved");
+            return false;
+        }
         int[] range = resolveReplacementRange(target, currentText);
+        if (range == null) {
+            recycleNode(target);
+            handleTargetSafetyFailure(generation, "Text range changed - dictation preserved");
+            return false;
+        }
         int start = range[0];
         int end = range[1];
         String nextText =
@@ -651,15 +752,23 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             insertionStart = start;
             insertionEnd = start + dictationText.length();
             lastDictationText = dictationText;
+            expectedFieldText = nextText;
             int cursor = insertionEnd;
             Bundle selection = new Bundle();
             selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor);
             selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor);
             target.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
         } else {
-            setStatus("Cannot write");
+            recycleNode(target);
+            handleTargetSafetyFailure(generation, "Cannot write to this field");
+            return false;
         }
         recycleNode(target);
+        return true;
+    }
+
+    private void handleTargetSafetyFailure(int generation, String message) {
+        handleStreamError(generation, message, "target_changed");
     }
 
     private void captureInsertionState(AccessibilityNodeInfo node) {
@@ -679,6 +788,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             insertionEnd = previousStart;
         }
         lastDictationText = "";
+        bestPartialText = "";
+        expectedFieldText = currentText;
+        targetFingerprint = fingerprint(node);
     }
 
     private int[] resolveReplacementRange(AccessibilityNodeInfo node, String currentText) {
@@ -686,21 +798,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (liveRange != null) {
             return liveRange;
         }
-
-        int start = node.getTextSelectionStart();
-        int end = node.getTextSelectionEnd();
-        if (start < 0 || end < 0) {
-            start = clamp(insertionEnd, 0, currentText.length());
-            end = start;
+        if (!lastDictationText.isEmpty()) {
+            return null;
         }
 
-        start = clamp(start, 0, currentText.length());
-        end = clamp(end, 0, currentText.length());
-        if (start > end) {
-            int previousStart = start;
-            start = end;
-            end = previousStart;
-        }
+        int start = clamp(insertionStart, 0, currentText.length());
+        int end = clamp(insertionEnd, start, currentText.length());
         return new int[]{start, end};
     }
 
@@ -719,8 +822,16 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             recycleNode(target);
             return;
         }
+        if (!targetFingerprint.equals(fingerprint(target))) {
+            recycleNode(target);
+            return;
+        }
 
         String currentText = getEditableText(target);
+        if (!RomanVoiceTextRange.hasExpectedContent(currentText, expectedFieldText)) {
+            recycleNode(target);
+            return;
+        }
         int[] range = findLiveDictationRange(currentText);
         if (range == null) {
             recycleNode(target);
@@ -747,6 +858,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         insertionStart = 0;
         insertionEnd = 0;
         lastDictationText = "";
+        bestPartialText = "";
+        expectedFieldText = "";
+        targetFingerprint = "";
     }
 
     private int clamp(int value, int min, int max) {
@@ -838,12 +952,82 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 && (node.isFocused() || node.isAccessibilityFocused());
     }
 
+    private String fingerprint(AccessibilityNodeInfo node) {
+        if (node == null) {
+            return "";
+        }
+        CharSequence packageName = node.getPackageName();
+        CharSequence className = node.getClassName();
+        String viewId = node.getViewIdResourceName();
+        return String.valueOf(packageName)
+                + "|" + node.getWindowId()
+                + "|" + String.valueOf(viewId)
+                + "|" + String.valueOf(className)
+                + "|" + node.hashCode();
+    }
+
     private void cleanupClient() {
         RomanVoiceStreamClient streamClient = client;
         client = null;
+        clientGeneration = 0;
         if (streamClient != null) {
             streamClient.close();
         }
+    }
+
+    private void cleanupClient(int generation) {
+        if (clientGeneration != generation) {
+            return;
+        }
+        cleanupClient();
+    }
+
+    private boolean isCurrentSession(int generation, RomanVoiceRecordingPhase requiredPhase) {
+        return generation == sessionGeneration && phase == requiredPhase;
+    }
+
+    private synchronized int beginSession() {
+        int generation = ++sessionGeneration;
+        setPhase(RomanVoiceRecordingPhase.CONNECTING);
+        return generation;
+    }
+
+    private synchronized void invalidateSession(RomanVoiceRecordingPhase nextPhase) {
+        sessionGeneration++;
+        setPhase(nextPhase);
+    }
+
+    private synchronized boolean transitionSession(
+            int generation,
+            RomanVoiceRecordingPhase expectedPhase,
+            RomanVoiceRecordingPhase nextPhase
+    ) {
+        if (!isCurrentSession(generation, expectedPhase)) {
+            return false;
+        }
+        setPhase(nextPhase);
+        return true;
+    }
+
+    private synchronized boolean activateAudioSession(int generation, AudioRecord record) {
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+            return false;
+        }
+        audioRecord = record;
+        setPhase(RomanVoiceRecordingPhase.RECORDING);
+        return true;
+    }
+
+    private synchronized boolean completeSession(
+            int generation,
+            RomanVoiceRecordingPhase nextPhase
+    ) {
+        if (generation != sessionGeneration) {
+            return false;
+        }
+        sessionGeneration++;
+        setPhase(nextPhase);
+        return true;
     }
 
     private boolean hasRecordPermission() {
@@ -876,6 +1060,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void showFailureNotice(String text) {
         setStatus(text);
         setPillColor(PILL_COLOR_ERROR);
+        if (micButton != null) {
+            micButton.setText(errorButtonLabel(text));
+        }
         Toast.makeText(this, text, Toast.LENGTH_LONG).show();
         if (overlayView == null) {
             return;
@@ -886,22 +1073,70 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void setRecordingControls(boolean isRecording) {
         cancelIdleOverlayHide();
-        setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true);
+        int color = phase == RomanVoiceRecordingPhase.ERROR
+                ? PILL_COLOR_ERROR
+                : (isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE);
+        setPillState(color, true);
         if (micButton != null) {
-            micButton.setText(isRecording ? "Stop" : "Start");
+            micButton.setText(
+                    phase == RomanVoiceRecordingPhase.ERROR
+                            ? errorButtonLabel(failureNotice)
+                            : (isRecording ? "Stop" : "Start")
+            );
             micButton.setContentDescription(
-                    isRecording ? "Stop RomanVoice dictation" : "Start RomanVoice dictation"
+                    phase == RomanVoiceRecordingPhase.ERROR
+                            ? failureNotice + ". Tap to retry."
+                            : (isRecording
+                                    ? "Stop RomanVoice dictation"
+                                    : "Start RomanVoice dictation")
             );
             micButton.setEnabled(true);
         }
         setOverlayClickTargetsEnabled(true);
-        setStatus(isRecording ? "Listening" : "Ready");
-        if (cancelButton != null) {
-            cancelButton.setVisibility(SHOW_CANCEL_BUTTON && isRecording ? View.VISIBLE : View.GONE);
+        if (phase != RomanVoiceRecordingPhase.ERROR) {
+            setStatus(isRecording ? "Listening" : "Ready");
         }
-        if (!isRecording) {
+        if (cancelButton != null) {
+            cancelButton.setEnabled(true);
+            cancelButton.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+        }
+        if (!isRecording && phase == RomanVoiceRecordingPhase.IDLE) {
             scheduleIdleOverlayHide(RESTART_WINDOW_VISIBLE_MS);
         }
+    }
+
+    private void setBusyControls(String label, int color) {
+        cancelIdleOverlayHide();
+        setStatus(label);
+        setPillState(color, true);
+        if (micButton != null) {
+            micButton.setText(label);
+            micButton.setEnabled(false);
+        }
+        if (overlayView != null) {
+            overlayView.setEnabled(true);
+        }
+        if (cancelButton != null) {
+            cancelButton.setEnabled(true);
+            cancelButton.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private String errorButtonLabel(String message) {
+        String value = message == null ? "" : message.toLowerCase();
+        if (value.contains("auth") || value.contains("token") || value.contains("url")) {
+            return "Setup";
+        }
+        if (value.contains("field") || value.contains("text")) {
+            return "Field";
+        }
+        if (value.contains("microphone")) {
+            return "Mic";
+        }
+        if (value.contains("connection") || value.contains("wi-fi") || value.contains("vpn")) {
+            return "Offline";
+        }
+        return "Error";
     }
 
     private void setOverlayClickTargetsEnabled(boolean enabled) {
@@ -968,7 +1203,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void reportPhoneHeartbeat(String event) {
-        reportPhoneHeartbeat(event, true);
+        reportPhoneHeartbeat(event, phase != RomanVoiceRecordingPhase.ERROR);
     }
 
     private void reportPhoneHeartbeat(String event, boolean available) {
@@ -980,17 +1215,6 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 phase == RomanVoiceRecordingPhase.RECORDING,
                 phase == RomanVoiceRecordingPhase.CONNECTING
         );
-    }
-
-    private String shortError(Exception exception) {
-        String message = exception.getMessage();
-        if (message == null || message.trim().isEmpty()) {
-            return "Offline";
-        }
-        if (message.length() > 24) {
-            return message.substring(0, 24);
-        }
-        return message;
     }
 
     private GradientDrawable roundedBackground(int color) {
@@ -1049,37 +1273,53 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private final class StreamListener implements RomanVoiceStreamClient.Listener {
+        private final int generation;
+
+        StreamListener(int generation) {
+            this.generation = generation;
+        }
+
         @Override
         public void onReady() {
             Log.i(TAG, "RomanVoice floating stream ready");
-            mainHandler.post(() -> setPillColor(PILL_COLOR_CONNECTING));
+            mainHandler.post(() -> {
+                if (isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+                    setPillColor(PILL_COLOR_CONNECTING);
+                }
+            });
         }
 
         @Override
         public void onStarted() {
             Log.i(TAG, "RomanVoice floating stream started");
             mainHandler.post(() -> {
-                setStatus("Listening");
-                setPillState(PILL_COLOR_RECORDING, true);
+                if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
+                    setStatus("Listening");
+                    setPillState(PILL_COLOR_RECORDING, true);
+                }
             });
         }
 
         @Override
         public void onPartial(String text) {
             Log.d(TAG, "RomanVoice floating partial length=" + (text == null ? 0 : text.length()));
-            mainHandler.post(() -> handlePartial(text));
+            mainHandler.post(() -> handlePartial(generation, text));
         }
 
         @Override
         public void onFinal(String text) {
             Log.i(TAG, "RomanVoice floating final length=" + (text == null ? 0 : text.length()));
-            mainHandler.post(() -> handleFinal(text));
+            mainHandler.post(() -> handleFinal(generation, text));
         }
 
         @Override
         public void onError(String message) {
             Log.w(TAG, "RomanVoice floating stream error: " + message);
-            mainHandler.post(() -> handleStreamError(message));
+            mainHandler.post(() -> handleStreamError(
+                    generation,
+                    RomanVoiceConnectionMessage.fromMessage(message),
+                    "stream_error"
+            ));
         }
     }
 }

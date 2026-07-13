@@ -5,5 +5,6 @@ enum TileState {
     READY,
     CONNECTING,
     LISTENING,
-    FINISHING
+    FINISHING,
+    ERROR
 }

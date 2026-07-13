@@ -16,6 +16,7 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.ssl.SSLSocketFactory;
 
@@ -23,6 +24,7 @@ final class RomanVoiceStreamClient implements Closeable {
     private static final int CONNECT_TIMEOUT_MS = 10000;
     private static final long PING_INTERVAL_MS = 5000;
     private static final long PONG_TIMEOUT_MS = 12000;
+    private static final long THREAD_JOIN_TIMEOUT_MS = 750;
 
     interface Listener {
         void onReady();
@@ -38,6 +40,7 @@ final class RomanVoiceStreamClient implements Closeable {
 
     private final URI uri;
     private final String token;
+    private final String clientLabel;
     private final Listener listener;
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -47,11 +50,19 @@ final class RomanVoiceStreamClient implements Closeable {
     private Thread readerThread;
     private Thread keepAliveThread;
     private volatile boolean closed;
+    private volatile boolean intentionalClose;
     private volatile long outstandingPingAtMs;
+    private final AtomicBoolean disconnectNotified = new AtomicBoolean();
 
-    RomanVoiceStreamClient(String streamUrl, String token, Listener listener) {
+    RomanVoiceStreamClient(
+            String streamUrl,
+            String token,
+            String clientLabel,
+            Listener listener
+    ) {
         this.uri = URI.create(streamUrl);
         this.token = token == null ? "" : token;
+        this.clientLabel = clientLabel == null ? "android" : clientLabel.trim();
         this.listener = listener;
     }
 
@@ -93,6 +104,7 @@ final class RomanVoiceStreamClient implements Closeable {
         request.append("Connection: Upgrade\r\n");
         request.append("Sec-WebSocket-Key: ").append(key).append("\r\n");
         request.append("Sec-WebSocket-Version: 13\r\n");
+        request.append("X-RomanVoice-Client: ").append(safeClientLabel()).append("\r\n");
         if (!token.isEmpty()) {
             request.append("Authorization: Bearer ").append(token).append("\r\n");
         }
@@ -148,22 +160,25 @@ final class RomanVoiceStreamClient implements Closeable {
 
     @Override
     public void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
+        intentionalClose = true;
         try {
-            sendFrame(0x8, new byte[]{0x03, (byte) 0xE8});
+            if (!closed) {
+                sendFrame(0x8, new byte[]{0x03, (byte) 0xE8});
+            }
         } catch (Exception ignored) {
         }
+        closed = true;
+        closeSocket();
+        interruptAndJoin(keepAliveThread);
+        interruptAndJoin(readerThread);
+    }
+
+    private void closeSocket() {
         try {
             if (socket != null) {
                 socket.close();
             }
         } catch (IOException ignored) {
-        }
-        if (keepAliveThread != null) {
-            keepAliveThread.interrupt();
         }
     }
 
@@ -173,7 +188,7 @@ final class RomanVoiceStreamClient implements Closeable {
 
     private synchronized void sendFrame(int opcode, byte[] payload) throws IOException {
         if (closed && opcode != 0x8) {
-            return;
+            throw new IOException("RomanVoice stream is closed");
         }
 
         int length = payload.length;
@@ -204,7 +219,7 @@ final class RomanVoiceStreamClient implements Closeable {
             while (!closed) {
                 Frame frame = readFrame();
                 if (frame.opcode == 0x8) {
-                    closed = true;
+                    notifyUnexpectedDisconnect("RomanVoice stream closed unexpectedly");
                     return;
                 }
                 if (frame.opcode == 0x9) {
@@ -220,9 +235,10 @@ final class RomanVoiceStreamClient implements Closeable {
                 }
             }
         } catch (Exception exception) {
-            if (!closed) {
-                listener.onError(exception.getMessage());
-            }
+            notifyUnexpectedDisconnect(exception.getMessage());
+        } finally {
+            closed = true;
+            closeSocket();
         }
     }
 
@@ -236,8 +252,7 @@ final class RomanVoiceStreamClient implements Closeable {
                 long now = System.currentTimeMillis();
                 long sentAt = outstandingPingAtMs;
                 if (sentAt > 0 && now - sentAt > PONG_TIMEOUT_MS) {
-                    listener.onError("RomanVoice stream ping timed out");
-                    close();
+                    notifyUnexpectedDisconnect("RomanVoice stream ping timed out");
                     return;
                 }
                 outstandingPingAtMs = now;
@@ -246,10 +261,36 @@ final class RomanVoiceStreamClient implements Closeable {
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         } catch (Exception exception) {
-            if (!closed) {
-                listener.onError(exception.getMessage());
-                close();
+            notifyUnexpectedDisconnect(exception.getMessage());
+        } finally {
+            if (!intentionalClose && disconnectNotified.get()) {
+                closed = true;
+                closeSocket();
             }
+        }
+    }
+
+    private void notifyUnexpectedDisconnect(String message) {
+        if (intentionalClose || !disconnectNotified.compareAndSet(false, true)) {
+            return;
+        }
+        closed = true;
+        closeSocket();
+        String detail = message == null || message.trim().isEmpty()
+                ? "RomanVoice stream closed unexpectedly"
+                : message;
+        listener.onError(detail);
+    }
+
+    private void interruptAndJoin(Thread thread) {
+        if (thread == null || thread == Thread.currentThread()) {
+            return;
+        }
+        thread.interrupt();
+        try {
+            thread.join(THREAD_JOIN_TIMEOUT_MS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -331,6 +372,11 @@ final class RomanVoiceStreamClient implements Closeable {
         byte[] bytes = new byte[16];
         secureRandom.nextBytes(bytes);
         return Base64.encodeToString(bytes, Base64.NO_WRAP);
+    }
+
+    private String safeClientLabel() {
+        String safe = clientLabel.replace("\r", "").replace("\n", "");
+        return safe.isEmpty() ? "android" : safe;
     }
 
     private static final class Frame {

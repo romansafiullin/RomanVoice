@@ -134,6 +134,9 @@ scenario above.
 - Desktop bearer token: `%APPDATA%\RomanVoice\service_token.txt`
 - Token rotation: `scripts\rotate-romanvoice-service-token.ps1`, followed by
   immediate reprovisioning and restart of every known consumer.
+- Firewall audit/apply: `scripts\configure-romanvoice-firewall.ps1`. Its applied
+  rule permits only authenticated RomanVoice TCP 8799 traffic arriving through
+  Tailscale and writes a full `.wfw` rollback backup before changing rules.
 - Phone endpoint and token: RomanVoice Android app preferences, provisioned by
   `clients/android-ime/install-to-connected-phone.ps1`
 

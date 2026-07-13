@@ -68,13 +68,22 @@ public class RomanVoiceTileService extends TileService {
                 break;
             case CONNECTING:
                 tile.setSubtitle("Connecting");
-                tile.setContentDescription("RomanVoice connecting.");
+                tile.setContentDescription("RomanVoice connecting. Tap to cancel.");
                 tile.setState(Tile.STATE_ACTIVE);
                 break;
             case FINISHING:
                 tile.setSubtitle("Finishing");
-                tile.setContentDescription("RomanVoice finishing dictation.");
+                tile.setContentDescription("RomanVoice finishing dictation. Tap to cancel.");
                 tile.setState(Tile.STATE_ACTIVE);
+                break;
+            case ERROR:
+                String failure = RomanVoiceFloatingService.getTileFailureForTile();
+                tile.setSubtitle(errorSubtitle(failure));
+                tile.setContentDescription(
+                        (failure == null || failure.isEmpty() ? "RomanVoice needs attention" : failure)
+                                + ". Tap to retry."
+                );
+                tile.setState(Tile.STATE_INACTIVE);
                 break;
             case READY:
                 tile.setSubtitle("Ready");
@@ -97,6 +106,20 @@ public class RomanVoiceTileService extends TileService {
                 break;
         }
         tile.updateTile();
+    }
+
+    private String errorSubtitle(String failure) {
+        String value = failure == null ? "" : failure.toLowerCase();
+        if (value.contains("auth") || value.contains("token") || value.contains("url")) {
+            return "Check setup";
+        }
+        if (value.contains("field") || value.contains("text")) {
+            return "Check text field";
+        }
+        if (value.contains("microphone")) {
+            return "Check microphone";
+        }
+        return "Check connection";
     }
 
     private void updateTileUnavailable() {

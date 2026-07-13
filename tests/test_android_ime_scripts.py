@@ -235,31 +235,32 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "private void cancelRecording()" in source
     assert "removeLiveDictationText()" in source
     assert 'cancelButton.setText("X")' in source
-    assert "private static final boolean SHOW_CANCEL_BUTTON = false" in source
+    assert "SHOW_CANCEL_BUTTON" not in source
     assert "cancelButton.setOnClickListener(view -> cancelRecording())" in source
     assert 'micButton.setText("Start")' in source
     assert 'micButton.setContentDescription("Start RomanVoice dictation")' in source
-    assert 'micButton.setText(isRecording ? "Stop" : "Start")' in source
+    assert '(isRecording ? "Stop" : "Start")' in source
     assert "overlayView.setVisibility(View.GONE)" in source
     assert "private TextView statusView" not in source
     assert "statusView.setVisibility(View.VISIBLE)" not in source
     assert "overlayView.setOnClickListener(view -> toggleRecording())" in source
     assert "RESTART_WINDOW_VISIBLE_MS = 8000" in source
     assert "cancelIdleOverlayHide()" in source
-    assert "setPillState(isRecording ? PILL_COLOR_RECORDING : PILL_COLOR_IDLE, true)" in source
+    assert "setPillState(color, true)" in source
     assert "scheduleIdleOverlayHide(RESTART_WINDOW_VISIBLE_MS)" in source
     assert "scheduleIdleOverlayHide(IDLE_NOTICE_VISIBLE_MS)" in source
-    assert "setPillState(PILL_COLOR_RECORDED, true)" in source
-    assert "showIdleNotice(\"Tap a text field first\")" in source
+    assert 'setBusyControls("Finishing", PILL_COLOR_RECORDED)' in source
+    assert 'failPreflight("Tap a text field first", "focused_field_missing", false)' in source
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
-    assert 'CONNECTION_FAILED_NOTICE = "No PC connection - check Wi-Fi/VPN"' in source
+    assert "CONNECTION_FAILED_NOTICE =\n            RomanVoiceConnectionMessage.NETWORK_FAILED" in source
     assert 'handlePhaseTimeout(CONNECTION_FAILED_NOTICE, "connection_timeout")' in source
-    assert "showFailureNotice(CONNECTION_FAILED_NOTICE)" in source
+    assert "RomanVoiceConnectionMessage.from(exception)" in source
     assert "Toast.makeText(this, text, Toast.LENGTH_LONG).show()" in source
     assert "PHONE_HEARTBEAT_INTERVAL_MS" in source
     assert "startPhoneHeartbeat()" in source
     assert "reportPhoneHeartbeat(\"destroyed\", false)" in source
-    assert "reportPhoneHeartbeat(\"connection_failed\")" in source
+    assert '"connection_failed"' in source
+    assert "reportPhoneHeartbeat(event, false)" in source
 
 
 def test_android_phone_heartbeat_posts_to_host_service():
@@ -346,20 +347,22 @@ def test_android_voice_surfaces_use_phase_guards_and_watchdogs():
         assert "CONNECTING_TIMEOUT_MS = 10000" in source
         assert "STOP_SEND_TIMEOUT_MS = 10000" in source
         assert "FINAL_RESULT_TIMEOUT_MS = 90000" in source
-        assert "ERROR_RESET_MS = 3000" in source
+        assert "ERROR_RESET_MS" not in source
+        assert "sessionGeneration" in source
+        assert "isCurrentSession" in source
         assert "private void setPhase(RomanVoiceRecordingPhase nextPhase)" in source
         assert "clearPhaseWatchdogs()" in source
         assert "isBusyStartingOrFinishing()" in source
         assert "phase != RomanVoiceRecordingPhase.IDLE" in source
         assert "phase == RomanVoiceRecordingPhase.ERROR" in source
-        assert "phase != RomanVoiceRecordingPhase.CONNECTING" in source
-        assert "phase != RomanVoiceRecordingPhase.FINISHING" in source
+        assert "RomanVoiceRecordingPhase.CONNECTING" in source
+        assert "RomanVoiceRecordingPhase.FINISHING" in source
         assert "handlePhaseTimeout(\"Finishing timed out - try again" in source
         assert "RomanVoicePreferences.isDefaultStreamUrl(streamUrl)" in source
 
     assert "TILE_TOGGLE_DEBOUNCE_MS = 750" in floating_source
     assert "lastTileToggleElapsedMs" in floating_source
-    assert "setOverlayClickTargetsEnabled(false)" in floating_source
+    assert "setOverlayClickTargetsEnabled(false)" not in floating_source
     assert "setOverlayClickTargetsEnabled(true)" in floating_source
 
 
@@ -476,7 +479,7 @@ def test_ime_service_has_cancel_path_for_composing_text():
     assert 'cancelButton.setText("Cancel")' in source
     assert "private void cancelRecording()" in source
     assert "clearComposingText()" in source
-    assert 'setStatus(wasRecording || hadClient ? "Canceled" : "Ready")' in source
+    assert 'setStatus(wasBusy || hadClient ? "Canceled" : "Ready")' in source
 
 
 def test_settings_activity_can_prompt_for_quick_settings_tile():
@@ -514,3 +517,189 @@ def test_floating_service_ignores_message_placeholder_text():
     assert "isKnownPlaceholder" in source
     assert "RCS message" in source
     assert "com.google.android.apps.messaging" in source
+
+
+def test_android_runtime_keeps_failures_visible_and_cancel_available_while_busy():
+    floating_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    ime_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+    tile_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceTileService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "scheduleErrorReset" not in floating_source
+    assert "scheduleErrorReset" not in ime_source
+    assert "return TileState.ERROR" in floating_source
+    assert "case ERROR:" in tile_source
+    assert 'setBusyControls("Connecting", PILL_COLOR_CONNECTING)' in floating_source
+    assert 'setBusyControls("Finishing", PILL_COLOR_RECORDED)' in floating_source
+    assert "cancelButton.setVisibility(View.VISIBLE)" in floating_source
+    assert "cancelButton.setVisibility(View.VISIBLE)" in ime_source
+    assert "isBusyStartingOrFinishing()) {\n            cancelRecording();" in floating_source
+    assert "isBusyStartingOrFinishing()) {\n            cancelRecording();" in ime_source
+
+
+def test_floating_insertion_is_pinned_to_expected_field_and_content():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "targetFingerprint = fingerprint(node)" in source
+    assert "expectedFieldText = currentText" in source
+    assert "!targetFingerprint.equals(fingerprint(target))" in source
+    assert "RomanVoiceTextRange.hasExpectedContent(currentText, expectedFieldText)" in source
+    assert "Text field changed - dictation preserved" in source
+    assert "expectedFieldText = nextText" in source
+    assert "bestPartialText" in source
+    assert "RomanVoiceTextRange.chooseFinalText(text, bestPartialText)" in source
+    assert "if (next.trim().isEmpty())" in source
+
+
+def test_android_stream_shutdown_and_audio_errors_are_terminal_and_generation_guarded():
+    stream_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceStreamClient.java"
+    ).read_text(encoding="utf-8")
+    floating_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    ime_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "notifyUnexpectedDisconnect" in stream_source
+    assert "RomanVoice stream closed unexpectedly" in stream_source
+    assert "interruptAndJoin(readerThread)" in stream_source
+    assert "thread.join(THREAD_JOIN_TIMEOUT_MS)" in floating_source
+    assert "thread.join(THREAD_JOIN_TIMEOUT_MS)" in ime_source
+    assert "if (read < 0)" in floating_source
+    assert "if (read < 0)" in ime_source
+    assert "new StreamListener(generation)" in floating_source
+    assert "new StreamListener(generation)" in ime_source
+
+
+def test_android_requests_identify_non_secret_client_surface():
+    stream_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceStreamClient.java"
+    ).read_text(encoding="utf-8")
+    heartbeat_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoicePhoneHeartbeat.java"
+    ).read_text(encoding="utf-8")
+    ime_source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceImeService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "X-RomanVoice-Client" in stream_source
+    assert '"android-floating"' in (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    assert '"android-ime"' in ime_source
+    assert '"android-ime-health"' in ime_source
+    assert "X-RomanVoice-Client" in heartbeat_source
+
+
+def test_floating_failure_heartbeats_report_unavailable():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "reportPhoneHeartbeat(event, false)" in source
+    assert "phase != RomanVoiceRecordingPhase.ERROR" in source

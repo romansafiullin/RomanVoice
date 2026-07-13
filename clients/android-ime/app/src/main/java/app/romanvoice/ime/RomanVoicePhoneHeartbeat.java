@@ -70,6 +70,10 @@ final class RomanVoicePhoneHeartbeat {
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
             connection.setRequestProperty("Authorization", "Bearer " + token);
+            connection.setRequestProperty(
+                    "X-RomanVoice-Client",
+                    "android-" + safeSurface(surface)
+            );
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("Content-Length", String.valueOf(body.length));
             try (OutputStream output = connection.getOutputStream()) {
@@ -99,5 +103,12 @@ final class RomanVoicePhoneHeartbeat {
         }
         url.append("/v1/phone/heartbeat");
         return url.toString();
+    }
+
+    private static String safeSurface(String surface) {
+        if (surface == null || surface.trim().isEmpty()) {
+            return "unknown";
+        }
+        return surface.replaceAll("[^A-Za-z0-9._-]", "-");
     }
 }

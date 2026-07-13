@@ -35,11 +35,21 @@ final class RomanVoiceTextRange {
                 return new int[]{firstMatch, firstMatch + last.length()};
             }
         }
-
-        if (end > start && end <= current.length() && end - start == last.length()) {
-            return new int[]{start, end};
-        }
         return null;
+    }
+
+    static boolean hasExpectedContent(String currentText, String expectedText) {
+        String current = currentText == null ? "" : currentText;
+        String expected = expectedText == null ? "" : expectedText;
+        return current.equals(expected);
+    }
+
+    static String chooseFinalText(String finalText, String bestPartialText) {
+        String value = finalText == null ? "" : finalText;
+        if (!value.trim().isEmpty()) {
+            return value;
+        }
+        return bestPartialText == null ? "" : bestPartialText;
     }
 
     private static int clamp(int value, int min, int max) {
