@@ -632,8 +632,14 @@ def test_android_stream_shutdown_and_audio_errors_are_terminal_and_generation_gu
     assert "thread.join(THREAD_JOIN_TIMEOUT_MS)" in ime_source
     assert "if (read < 0)" in floating_source
     assert "if (read < 0)" in ime_source
+    assert "handleRecordingError" in floating_source
+    assert "handleRecordingError" in ime_source
+    assert "isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)" in floating_source
+    assert "isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)" in ime_source
     assert "new StreamListener(generation)" in floating_source
     assert "new StreamListener(generation)" in ime_source
+    assert "activateClientSession(generation, streamClient)" in floating_source
+    assert "activateClientSession(generation, streamClient)" in ime_source
 
 
 def test_android_requests_identify_non_secret_client_surface():

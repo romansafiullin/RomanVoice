@@ -251,12 +251,10 @@ public class RomanVoiceImeService extends InputMethodService {
                 );
                 streamClient.connect();
                 streamClient.sendStart(SAMPLE_RATE, RomanVoicePreferences.polish(this));
-                if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+                if (!activateClientSession(generation, streamClient)) {
                     streamClient.close();
                     return;
                 }
-                client = streamClient;
-                clientGeneration = generation;
                 startAudioPump(generation, streamClient);
                 mainHandler.post(() -> {
                     if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
@@ -330,7 +328,7 @@ public class RomanVoiceImeService extends InputMethodService {
                     read = record.read(buffer, 0, buffer.length);
                 } catch (RuntimeException exception) {
                     Log.w(TAG, "Audio read failed", exception);
-                    mainHandler.post(() -> handleStreamError(
+                    mainHandler.post(() -> handleRecordingError(
                             generation,
                             "Microphone stopped - try again"
                     ));
@@ -338,7 +336,7 @@ public class RomanVoiceImeService extends InputMethodService {
                 }
                 if (read < 0) {
                     Log.w(TAG, "Audio read returned error " + read);
-                    mainHandler.post(() -> handleStreamError(
+                    mainHandler.post(() -> handleRecordingError(
                             generation,
                             "Microphone stopped - try again"
                     ));
@@ -349,14 +347,14 @@ public class RomanVoiceImeService extends InputMethodService {
                         streamClient.sendAudio(buffer, read);
                     } catch (IOException exception) {
                         Log.w(TAG, "Failed to send audio chunk", exception);
-                        mainHandler.post(() -> handleStreamError(
+                        mainHandler.post(() -> handleRecordingError(
                                 generation,
                                 RomanVoiceConnectionMessage.from(exception)
                         ));
                         break;
                     } catch (RuntimeException exception) {
                         Log.w(TAG, "Audio pump failed", exception);
-                        mainHandler.post(() -> handleStreamError(
+                        mainHandler.post(() -> handleRecordingError(
                                 generation,
                                 RomanVoiceConnectionMessage.from(exception)
                         ));
@@ -523,6 +521,12 @@ public class RomanVoiceImeService extends InputMethodService {
                 : message);
     }
 
+    private void handleRecordingError(int generation, String message) {
+        if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
+            handleStreamError(generation, message);
+        }
+    }
+
     private void cleanupClient() {
         RomanVoiceStreamClient streamClient = client;
         client = null;
@@ -572,6 +576,18 @@ public class RomanVoiceImeService extends InputMethodService {
         }
         audioRecord = record;
         setPhase(RomanVoiceRecordingPhase.RECORDING);
+        return true;
+    }
+
+    private synchronized boolean activateClientSession(
+            int generation,
+            RomanVoiceStreamClient streamClient
+    ) {
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+            return false;
+        }
+        client = streamClient;
+        clientGeneration = generation;
         return true;
     }
 

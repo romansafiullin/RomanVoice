@@ -394,12 +394,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 );
                 streamClient.connect();
                 streamClient.sendStart(SAMPLE_RATE, RomanVoicePreferences.polish(this));
-                if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+                if (!activateClientSession(generation, streamClient)) {
                     streamClient.close();
                     return;
                 }
-                client = streamClient;
-                clientGeneration = generation;
                 startAudioPump(generation, streamClient);
                 mainHandler.post(() -> {
                     if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
@@ -512,7 +510,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     read = record.read(buffer, 0, buffer.length);
                 } catch (RuntimeException exception) {
                     Log.w(TAG, "Floating audio read failed", exception);
-                    mainHandler.post(() -> handleStreamError(
+                    mainHandler.post(() -> handleRecordingError(
                             generation,
                             "Microphone stopped - try again",
                             "audio_read_failed"
@@ -522,7 +520,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 if (read < 0) {
                     int errorCode = read;
                     Log.w(TAG, "Floating audio read returned error " + errorCode);
-                    mainHandler.post(() -> handleStreamError(
+                    mainHandler.post(() -> handleRecordingError(
                             generation,
                             "Microphone stopped - try again",
                             "audio_read_failed"
@@ -534,7 +532,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                         streamClient.sendAudio(buffer, read);
                     } catch (IOException exception) {
                         Log.w(TAG, "Failed to send floating audio chunk", exception);
-                        mainHandler.post(() -> handleStreamError(
+                        mainHandler.post(() -> handleRecordingError(
                                 generation,
                                 RomanVoiceConnectionMessage.from(exception),
                                 "audio_send_failed"
@@ -542,7 +540,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                         break;
                     } catch (RuntimeException exception) {
                         Log.w(TAG, "Floating audio pump failed", exception);
-                        mainHandler.post(() -> handleStreamError(
+                        mainHandler.post(() -> handleRecordingError(
                                 generation,
                                 RomanVoiceConnectionMessage.from(exception),
                                 "audio_send_failed"
@@ -710,6 +708,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         resetLiveDictationState();
         notifyTileStateChanged();
         reportPhoneHeartbeat(event, false);
+    }
+
+    private void handleRecordingError(int generation, String message, String event) {
+        if (isCurrentSession(generation, RomanVoiceRecordingPhase.RECORDING)) {
+            handleStreamError(generation, message, event);
+        }
     }
 
     private boolean writeDictationText(int generation, String dictationText) {
@@ -1015,6 +1019,18 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
         audioRecord = record;
         setPhase(RomanVoiceRecordingPhase.RECORDING);
+        return true;
+    }
+
+    private synchronized boolean activateClientSession(
+            int generation,
+            RomanVoiceStreamClient streamClient
+    ) {
+        if (!isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
+            return false;
+        }
+        client = streamClient;
+        clientGeneration = generation;
         return true;
     }
 
