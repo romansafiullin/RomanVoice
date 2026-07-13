@@ -132,6 +132,8 @@ scenario above.
 - Desktop runtime configuration: `%APPDATA%\RomanVoice\config.json` plus
   explicit `ROMANVOICE_*` environment overrides
 - Desktop bearer token: `%APPDATA%\RomanVoice\service_token.txt`
+- Token rotation: `scripts\rotate-romanvoice-service-token.ps1`, followed by
+  immediate reprovisioning and restart of every known consumer.
 - Phone endpoint and token: RomanVoice Android app preferences, provisioned by
   `clients/android-ime/install-to-connected-phone.ps1`
 
