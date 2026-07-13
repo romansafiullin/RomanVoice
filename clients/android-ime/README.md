@@ -74,15 +74,18 @@ The floating mic service also sends an authenticated heartbeat to
 `/v1/phone/status` so host checks can tell the difference between "RomanVoice is
 running on Windows" and "the phone Quick Settings tile is actually backed by an
 active floating service." Run this from the repo root when the tile looks dark,
-unavailable, or stale:
+unavailable, stale, or when you want to prove the full phone-to-PC path:
 
 ```powershell
 .\scripts\check-phone-tile-health.ps1
 ```
 
-With the Pixel connected over USB debugging, add `-RequireAdbDevice` to also
-verify the installed package, microphone permission, configured stream URL, and
-enabled `RomanVoice Floating Mic` accessibility service.
+The health gate requires the Pixel to be connected over USB debugging. It checks
+the installed package, microphone permission, private preference permissions,
+configured stream URL, token fingerprint, Tailscale/VPN state, accessibility
+service, heartbeat, and an authenticated WebSocket upgrade originating on the
+phone. `-RequireAdbDevice` remains accepted for compatibility. Use
+`-AllowLanOnly` only for an intentional home-only diagnostic.
 
 For command-line install after USB debugging is enabled:
 
@@ -92,11 +95,11 @@ For command-line install after USB debugging is enabled:
 ```
 
 The install script reads `%APPDATA%\RomanVoice\service_token.txt`, installs the
-debug APK, grants microphone permission, and preloads the IME settings. When this
-PC is logged into Tailscale, it uses the PC's `100.x` Tailscale address so the
-phone can keep reaching RomanVoice on 5G. If Tailscale is unavailable, it falls
-back to this PC's LAN URL; pass `-PreferLan` when you intentionally want the
-LAN-only URL. By default it preserves or restores the normal keyboard, preferring
+debug APK, grants microphone permission, and preloads the IME settings without
+writing token-bearing temporary files. It requires the PC's Tailscale address so
+the phone can keep reaching RomanVoice on 5G and fails instead of silently
+falling back to home Wi-Fi. Pass `-PreferLan` only when you intentionally want a
+home-only URL. By default it preserves or restores the normal keyboard, preferring
 SwiftKey when RomanVoice was already active, and enables/verifies the floating
 mic service through ADB for development testing. Pass `-SetRomanVoiceKeyboard`
 when you want the full RomanVoice keyboard selected instead.
@@ -105,6 +108,10 @@ The debug APK is signed with a durable local keystore at
 update the installed app without a clean uninstall. If a mismatched older debug
 build is already installed, the install script uninstalls and reinstalls the
 RomanVoice IME package before reloading settings.
+
+Android version, SDK, and build-tools metadata have one source at
+`version.properties`. RomanVoice Settings displays the installed version code
+and name so a stale APK can be identified without guessing.
 
 For phone-side debugging while the Pixel is connected with USB debugging:
 

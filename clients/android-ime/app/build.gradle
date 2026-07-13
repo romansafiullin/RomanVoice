@@ -2,15 +2,25 @@ plugins {
     id "com.android.application"
 }
 
+def romanVoiceVersion = new Properties()
+file("../version.properties").withInputStream { romanVoiceVersion.load(it) }
+
 android {
     namespace "app.romanvoice.ime"
-    compileSdk 35
+    compileSdk romanVoiceVersion.getProperty("compileSdk").toInteger()
+    buildToolsVersion romanVoiceVersion.getProperty("buildToolsVersion")
 
     defaultConfig {
         applicationId "app.romanvoice.ime"
-        minSdk 26
-        targetSdk 35
-        versionCode 1
-        versionName "0.1.0"
+        minSdk romanVoiceVersion.getProperty("minSdk").toInteger()
+        targetSdk romanVoiceVersion.getProperty("targetSdk").toInteger()
+        versionCode romanVoiceVersion.getProperty("versionCode").toInteger()
+        versionName romanVoiceVersion.getProperty("versionName")
+    }
+
+    buildTypes {
+        debug {
+            versionNameSuffix "-debug"
+        }
     }
 }

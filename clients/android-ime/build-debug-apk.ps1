@@ -8,8 +8,18 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppRoot = Join-Path $ProjectRoot "app"
 $BuildRoot = Join-Path $ProjectRoot "build\manual"
-$ToolsRoot = Join-Path $AndroidSdkRoot "build-tools\35.0.0"
-$PlatformJar = Join-Path $AndroidSdkRoot "platforms\android-35\android.jar"
+$VersionPropertiesPath = Join-Path $ProjectRoot "version.properties"
+if (-not (Test-Path -LiteralPath $VersionPropertiesPath)) {
+    throw "Android version metadata is missing: $VersionPropertiesPath"
+}
+$VersionProperties = ConvertFrom-StringData (Get-Content -Raw -LiteralPath $VersionPropertiesPath)
+$CompileSdk = [int]$VersionProperties.compileSdk
+$TargetSdk = [int]$VersionProperties.targetSdk
+$MinSdk = [int]$VersionProperties.minSdk
+$VersionCode = [int]$VersionProperties.versionCode
+$VersionName = "$($VersionProperties.versionName)-debug"
+$ToolsRoot = Join-Path $AndroidSdkRoot "build-tools\$($VersionProperties.buildToolsVersion)"
+$PlatformJar = Join-Path $AndroidSdkRoot "platforms\android-$CompileSdk\android.jar"
 
 $Aapt = Join-Path $ToolsRoot "aapt.exe"
 $Aapt2 = Join-Path $ToolsRoot "aapt2.exe"
@@ -64,10 +74,11 @@ Invoke-Checked $Aapt2 @(
     "-I", $PlatformJar,
     "--manifest", (Join-Path $AppRoot "src\main\AndroidManifest.xml"),
     "--java", (Join-Path $BuildRoot "generated"),
-    "--min-sdk-version", "26",
-    "--target-sdk-version", "35",
-    "--version-code", "1",
-    "--version-name", "0.1.0",
+    "--min-sdk-version", "$MinSdk",
+    "--target-sdk-version", "$TargetSdk",
+    "--version-code", "$VersionCode",
+    "--version-name", $VersionName,
+    "--debug-mode",
     "-R", $CompiledRes,
     "--auto-add-overlay"
 )

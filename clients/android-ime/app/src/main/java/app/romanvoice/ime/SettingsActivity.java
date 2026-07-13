@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.StatusBarManager;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Icon;
 import android.os.Build;
@@ -40,6 +41,10 @@ public class SettingsActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
         ));
+
+        TextView buildIdentity = new TextView(this);
+        buildIdentity.setText(installedBuildIdentity());
+        root.addView(buildIdentity, matchWidth());
 
         streamUrlField = new EditText(this);
         streamUrlField.setSingleLine(true);
@@ -166,5 +171,17 @@ public class SettingsActivity extends Activity {
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private String installedBuildIdentity() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? info.getLongVersionCode()
+                    : info.versionCode;
+            return "Installed build: " + info.versionName + " (" + versionCode + ")";
+        } catch (PackageManager.NameNotFoundException exception) {
+            return "Installed build: unknown";
+        }
     }
 }

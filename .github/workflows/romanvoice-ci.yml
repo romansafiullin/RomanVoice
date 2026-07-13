@@ -53,8 +53,9 @@ jobs:
       - name: Install pinned Android SDK components
         shell: pwsh
         run: |
+          $metadata = ConvertFrom-StringData (Get-Content -Raw .\clients\android-ime\version.properties)
           $sdkManager = Join-Path $env:ANDROID_HOME "cmdline-tools\latest\bin\sdkmanager.bat"
-          & $sdkManager "platforms;android-35" "build-tools;35.0.0"
+          & $sdkManager "platforms;android-$($metadata.compileSdk)" "build-tools;$($metadata.buildToolsVersion)"
           if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed with $LASTEXITCODE" }
 
       - name: Build and verify Android APK
