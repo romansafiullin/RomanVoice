@@ -90,6 +90,23 @@ class FakeStreamingBackend:
         return text.strip()
 
 
+class FakeTimedOutStreamingTranscriber:
+    last_stop_timed_out = True
+
+    def __init__(self, **_kwargs):
+        self.audio_chunks = []
+
+    def start_streaming(self, *, sample_rate: int, callback):
+        self.sample_rate = sample_rate
+        self.callback = callback
+
+    def feed_audio(self, audio_chunk):
+        self.audio_chunks.append(audio_chunk)
+
+    def stop_streaming(self) -> str:
+        return "stale rolling words"
+
+
 class FakeChunkingBackend:
     name = "fake-chunking-whisper"
     device_info = "chunk-device"
@@ -618,6 +635,54 @@ def test_service_streaming_falls_back_to_preview_when_final_is_empty(tmp_path, m
     assert final["text"] == "streamed words"
     assert final["raw_text"] == "streamed words"
     assert final["final_source"] == "streaming_preview_fallback"
+    assert backend.final_wave_info["frames"] == 1600
+
+
+def test_service_streaming_runs_final_pass_when_rolling_worker_times_out(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
+    monkeypatch.setattr(config, "PHONE_STREAM_FINAL_PASS_ENABLED", False)
+    import services.dictation_service as dictation_service_module
+
+    monkeypatch.setattr(
+        dictation_service_module,
+        "StreamingTranscriber",
+        FakeTimedOutStreamingTranscriber,
+    )
+    backend = FakeStreamingBackend(final_text="full final phone words")
+    controller = FakeController(backend)
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        sock, response = open_websocket(
+            f"{service.base_url}/v1/transcribe/stream",
+            token="secret",
+        )
+        assert b" 101 " in response
+        assert recv_server_json(sock)["type"] == "ready"
+
+        send_text(sock, {"type": "start", "sample_rate": 16000, "polish": "off"})
+        assert recv_server_json(sock)["type"] == "started"
+
+        send_binary(sock, (b"\x01\x00" * 1600))
+        send_text(sock, {"type": "stop"})
+
+        while True:
+            payload = recv_server_json(sock)
+            if payload["type"] == "final":
+                final = payload
+                break
+        sock.close()
+    finally:
+        service.stop()
+
+    assert final["ok"] is True
+    assert final["text"] == "full final phone words"
+    assert final["raw_text"] == "full final phone words"
+    assert final["final_source"] == "final_wav_after_stream_timeout"
+    assert final["rolling_text_length"] == len("stale rolling words")
     assert backend.final_wave_info["frames"] == 1600
 
 

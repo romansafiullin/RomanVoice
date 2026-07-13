@@ -57,9 +57,14 @@ class TranscriptionRuntime:
 
     def start_recording(self) -> None:
         """Start audio recording."""
+        if getattr(self.controller, "_recording_stop_in_progress", False):
+            logger.info("Start requested while recording stop is in progress; ignoring")
+            return
+
         focus_token = self._capture_text_injection_focus_token()
         if self.controller.recorder.start_recording():
             logger.info("Recording started")
+            self.controller._recording_stop_in_progress = False
             self.controller._last_streaming_text = ""
             self.controller._best_streaming_text = ""
             self.controller._streaming_guard_evaluated = False
@@ -82,99 +87,111 @@ class TranscriptionRuntime:
 
     def stop_recording(self) -> None:
         """Stop audio recording and start transcription."""
-        self.controller.stop_silence_auto_stop_monitor()
-
-        if self.controller._streaming_paste_enabled:
-            self.controller.streaming_overlay_hide.emit()
-            settings = settings_manager.load_all_settings()
-            if settings.get(SettingsKey.AUTO_PASTE, True):
-                self.controller.caret_indicator_show.emit()
-
-        self.controller.streaming_runtime.stop_streaming_session()
-
-        if not self.controller.recorder.stop_recording():
-            self.controller.overlay_state_update.emit(OverlayState.NONE)
-            self.controller.status_update.emit("Failed to stop recording")
+        if getattr(self.controller, "_recording_stop_in_progress", False):
+            logger.info("Stop requested while recording stop is already in progress; ignoring")
             return
 
-        self.controller.recording_state_changed.emit(False)
-
-        if not self.controller.recorder.wait_for_stop_completion():
-            logger.warning(
-                "Proceeding without confirmed post-roll completion; "
-                "tail of recording may be short"
-            )
-
-        if not self.controller.recorder.has_recording_data():
-            logger.error("No recording data available")
-            self.on_transcription_error("No audio data recorded")
-            return
-
-        if not self.controller.recorder.save_recording():
-            logger.error("Failed to save recording")
-            self.on_transcription_error("Failed to save audio file")
-            return
-
-        if not os.path.exists(config.RECORDED_AUDIO_FILE):
-            logger.error(f"Audio file not found: {config.RECORDED_AUDIO_FILE}")
-            self.on_transcription_error("Audio file not created")
-            return
-
-        file_size = os.path.getsize(config.RECORDED_AUDIO_FILE)
-        logger.info(f"Audio file size: {file_size} bytes")
-        if file_size < 100:
-            logger.error(f"Audio file too small: {file_size} bytes")
-            self.on_transcription_error("Audio file is empty or corrupted")
-            return
-
-        metrics_fn = getattr(self.controller.recorder, "get_recording_signal_metrics", None)
-        if callable(metrics_fn):
-            metrics = metrics_fn()
-            logger.info("Recording signal metrics: %s", metrics)
-            samples = int(metrics.get("samples", 0))
-            peak = int(metrics.get("peak", 0))
-            if samples <= 0 or peak <= 0:
-                self.on_transcription_error(
-                    "No microphone input detected. Check the selected microphone/input level."
-                )
-                return
-            if peak < config.MIN_MIC_INPUT_PEAK:
-                logger.warning(
-                    "Recording peak is low (%s < %s); continuing because Whisper can "
-                    "still transcribe quiet microphone input",
-                    peak,
-                    config.MIN_MIC_INPUT_PEAK,
-                )
-
-        self.controller._pending_audio_path = config.RECORDED_AUDIO_FILE
-        self.controller._pending_audio_duration = (
-            self.controller.recorder.get_recording_duration()
-        )
-        self.controller._pending_file_size = file_size
-
-        if self._complete_short_form_from_streaming():
-            return
-        if self._complete_gpu_busy_from_streaming():
-            return
-
-        self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
-        self.controller.status_update.emit("Processing...")
+        self.controller._recording_stop_in_progress = True
 
         try:
-            self._submit_transcription_job(config.RECORDED_AUDIO_FILE)
-            logger.info(
-                "Transcription started. Duration: "
-                f"{self.controller.recorder.get_recording_duration():.2f}s"
+            self.controller.stop_silence_auto_stop_monitor()
+
+            if self.controller._streaming_paste_enabled:
+                self.controller.streaming_overlay_hide.emit()
+                settings = settings_manager.load_all_settings()
+                if settings.get(SettingsKey.AUTO_PASTE, True):
+                    self.controller.caret_indicator_show.emit()
+
+            self.controller.streaming_runtime.stop_streaming_session()
+
+            if not self.controller.recorder.stop_recording():
+                self.controller.overlay_state_update.emit(OverlayState.NONE)
+                self.controller.status_update.emit("Failed to stop recording")
+                return
+
+            self.controller.recording_state_changed.emit(False)
+
+            if not self.controller.recorder.wait_for_stop_completion():
+                logger.warning(
+                    "Proceeding without confirmed post-roll completion; "
+                    "tail of recording may be short"
+                )
+
+            if not self.controller.recorder.has_recording_data():
+                logger.error("No recording data available")
+                self.on_transcription_error("No audio data recorded")
+                return
+
+            if not self.controller.recorder.save_recording():
+                logger.error("Failed to save recording")
+                self.on_transcription_error("Failed to save audio file")
+                return
+
+            if not os.path.exists(config.RECORDED_AUDIO_FILE):
+                logger.error(f"Audio file not found: {config.RECORDED_AUDIO_FILE}")
+                self.on_transcription_error("Audio file not created")
+                return
+
+            file_size = os.path.getsize(config.RECORDED_AUDIO_FILE)
+            logger.info(f"Audio file size: {file_size} bytes")
+            if file_size < 100:
+                logger.error(f"Audio file too small: {file_size} bytes")
+                self.on_transcription_error("Audio file is empty or corrupted")
+                return
+
+            metrics_fn = getattr(self.controller.recorder, "get_recording_signal_metrics", None)
+            if callable(metrics_fn):
+                metrics = metrics_fn()
+                logger.info("Recording signal metrics: %s", metrics)
+                samples = int(metrics.get("samples", 0))
+                peak = int(metrics.get("peak", 0))
+                if samples <= 0 or peak <= 0:
+                    self.on_transcription_error(
+                        "No microphone input detected. Check the selected microphone/input level."
+                    )
+                    return
+                if peak < config.MIN_MIC_INPUT_PEAK:
+                    logger.warning(
+                        "Recording peak is low (%s < %s); continuing because Whisper can "
+                        "still transcribe quiet microphone input",
+                        peak,
+                        config.MIN_MIC_INPUT_PEAK,
+                    )
+
+            self.controller._pending_audio_path = config.RECORDED_AUDIO_FILE
+            self.controller._pending_audio_duration = (
+                self.controller.recorder.get_recording_duration()
             )
-        except Exception as exc:
-            logger.error(f"Failed to start transcription: {exc}")
-            self.on_transcription_error(f"Failed to process audio: {exc}")
+            self.controller._pending_file_size = file_size
+
+            if self._complete_short_form_from_streaming():
+                return
+            if self._complete_gpu_busy_from_streaming():
+                return
+
+            self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
+            self.controller.status_update.emit("Processing...")
+
+            try:
+                self._submit_transcription_job(config.RECORDED_AUDIO_FILE)
+                logger.info(
+                    "Transcription started. Duration: "
+                    f"{self.controller.recorder.get_recording_duration():.2f}s"
+                )
+            except Exception as exc:
+                logger.error(f"Failed to start transcription: {exc}")
+                self.on_transcription_error(f"Failed to process audio: {exc}")
+        finally:
+            self.controller._recording_stop_in_progress = False
 
     def toggle_recording(self) -> None:
         """Toggle between starting and stopping recording."""
         logger.info(
             f"Toggle recording. Current state: {self.controller.recorder.is_recording}"
         )
+        if getattr(self.controller, "_recording_stop_in_progress", False):
+            logger.info("Toggle requested while recording stop is in progress; ignoring")
+            return
         if not self.controller.recorder.is_recording:
             active_backend = self._get_active_transcription_backend()
             if self._is_final_transcription_in_flight() or (

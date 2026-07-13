@@ -82,6 +82,7 @@ class ApplicationController(QObject):
         self._silence_auto_stop_started_at = 0.0
         self._last_voice_activity_time = 0.0
         self._silence_auto_stop_triggered = False
+        self._recording_stop_in_progress = False
 
         self._pending_audio_path: Optional[str] = None
         self._pending_audio_duration: Optional[float] = None

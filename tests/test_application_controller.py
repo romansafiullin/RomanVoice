@@ -667,6 +667,34 @@ class TestApplicationController(unittest.TestCase):
             controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
         )
 
+    def test_stop_recording_ignores_reentrant_stop_during_post_roll(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+        controller.recorder.duration = 5.31
+        controller.streaming_transcriber.stop_streaming = lambda: "preview text"
+        stop_calls = 0
+
+        def stop_recording():
+            nonlocal stop_calls
+            stop_calls += 1
+            return True
+
+        def wait_for_stop_completion():
+            controller.stop_recording()
+            controller.recorder.is_recording = False
+            return True
+
+        controller.recorder.stop_recording = stop_recording
+        controller.recorder.wait_for_stop_completion = wait_for_stop_completion
+
+        controller.stop_recording()
+
+        self.assertEqual(stop_calls, 1)
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
+        )
+
     def test_stop_recording_uses_streaming_text_when_gpu_busy_for_normal_dictation(self):
         controller = self._create_controller()
         live_text = "text message about the phone problem"

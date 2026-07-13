@@ -64,6 +64,7 @@ class StreamingTranscriber:
         self._slow_chunks = 0
         self._last_warning_time = 0
         self._last_gpu_skip_log = 0.0
+        self.last_stop_timed_out = False
 
         logger.info(
             "StreamingTranscriber initialized "
@@ -90,6 +91,7 @@ class StreamingTranscriber:
         self._all_audio_buffer.clear()  # Clear master audio buffer
         self._chunk_count = 0
         self._slow_chunks = 0
+        self.last_stop_timed_out = False
 
         # Start worker thread
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -123,6 +125,7 @@ class StreamingTranscriber:
             return ""
 
         logger.info("Stopping streaming transcription...")
+        self.last_stop_timed_out = False
         self._stop_requested = True
         self.callback = None
 
@@ -130,6 +133,7 @@ class StreamingTranscriber:
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5.0)
             if self.worker_thread.is_alive():
+                self.last_stop_timed_out = True
                 logger.warning("Worker thread did not finish in time")
 
         self.is_streaming = False

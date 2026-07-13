@@ -410,10 +410,10 @@ class RomanVoiceDictationService:
         base = time.strftime("romanvoice_service_upload_%Y%m%d-%H%M%S")
         millis = int((time.time() % 1) * 1000)
         stem = f"{base}-{millis:03d}"
-        candidate = diagnostic_dir / f"{stem}{suffix}"
+        candidate = diagnostic_dir / f"{stem}-000{suffix}"
         index = 1
         while candidate.exists():
-            candidate = diagnostic_dir / f"{stem}-{index}{suffix}"
+            candidate = diagnostic_dir / f"{stem}-{index:03d}{suffix}"
             index += 1
         return candidate
 
@@ -682,6 +682,7 @@ class RomanVoiceDictationService:
             if streamer is None or final_sent:
                 return
             rolling_text = streamer.stop_streaming().strip()
+            rolling_stop_timed_out = bool(getattr(streamer, "last_stop_timed_out", False))
             streamer = None
             raw_text = rolling_text
             final_source = "streaming_preview"
@@ -696,9 +697,15 @@ class RomanVoiceDictationService:
                 and (
                     config.PHONE_STREAM_FINAL_PASS_ENABLED
                     or not rolling_text
+                    or rolling_stop_timed_out
                 )
             )
             if should_run_final_pass:
+                final_pass_reason = (
+                    "streaming_timeout"
+                    if rolling_stop_timed_out
+                    else "enabled_or_empty_preview"
+                )
                 temp_wav_path: Path | None = None
                 try:
                     temp_wav_path = self._write_temp_pcm16_wav(audio_bytes, sample_rate)
@@ -732,7 +739,18 @@ class RomanVoiceDictationService:
                         )
                     elif final_raw_text:
                         raw_text = final_raw_text
-                        final_source = "final_wav"
+                        final_source = (
+                            "final_wav_after_stream_timeout"
+                            if rolling_stop_timed_out
+                            else "final_wav"
+                        )
+                        logger.info(
+                            "Using final phone WAV pass (reason=%s, rolling_chars=%s, "
+                            "final_chars=%s)",
+                            final_pass_reason,
+                            len(rolling_text),
+                            len(final_raw_text),
+                        )
                     elif rolling_text:
                         raw_text = rolling_text
                         final_source = "streaming_preview_fallback"
