@@ -5,6 +5,8 @@ milestone is simple: press a global hotkey, speak, transcribe locally with
 Faster-Whisper, and type the result into the active Windows app without touching
 the clipboard unless a fallback is needed.
 
+Product direction and release gates are defined in `docs/NORTH_STAR.md`.
+
 ## RomanVoice Quick Start
 
 Use Python 3.12 through `uv`; the machine default Python may be too new for
