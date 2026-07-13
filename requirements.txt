@@ -1,4 +1,5 @@
-# Core dependencies
+# Compatibility dependency list for legacy pip installs.
+# pyproject.toml is the source of truth; tests enforce an exact direct-dependency match.
 sounddevice>=0.4.6
 numpy>=1.24.0
 keyboard>=0.13.5

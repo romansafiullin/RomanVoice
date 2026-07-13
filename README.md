@@ -176,6 +176,10 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+`pyproject.toml` and `uv.lock` are authoritative. `requirements.txt` remains a
+compatibility list for this legacy installer, and CI verifies that its direct
+dependencies stay synchronized.
+
 OPTIONAL: For cloud transcription, set your API key:
 ```bash
 # Windows
