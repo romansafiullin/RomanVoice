@@ -258,7 +258,7 @@ if ($serviceOwners.Count -gt 0) {
     if ($serviceOwners.Count -gt 0) {
         $ownerExecutable = if ($owner) { [string]$owner.ExecutablePath } else { "unknown executable" }
         Write-WatchdogLog "RomanVoice service port $servicePort owned by non-preferred pid=$ownerPid ($ownerExecutable); expected $venvPythonw."
-        exit 0
+        exit 4
     }
 }
 

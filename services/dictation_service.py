@@ -106,10 +106,13 @@ class RomanVoiceDictationService:
             if token is not None
             else service_token_configuration()
         )
-        if self._token_configuration.get("environment_file_mismatch"):
+        if (
+            self._token_configuration.get("environment_file_mismatch")
+            or self._token_configuration.get("active_file_mismatch")
+        ):
             raise RuntimeError(
-                "Refusing to start RomanVoice because ROMANVOICE_SERVICE_TOKEN "
-                "differs from the durable service token file"
+                "Refusing to start RomanVoice because the configured or active "
+                "service token differs from the durable service token file"
             )
         self.max_audio_bytes = int(
             (max_audio_mb if max_audio_mb is not None else config.SERVICE_MAX_AUDIO_MB)

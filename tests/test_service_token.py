@@ -76,6 +76,44 @@ def test_service_refuses_mismatched_environment_and_file_tokens(
     assert "environment-secret" not in message
 
 
+def test_existing_service_token_is_reprotected_before_reuse(tmp_path, monkeypatch):
+    token_file = tmp_path / "service_token.txt"
+    token_file.write_text("durable-secret\n", encoding="utf-8")
+    protected_paths = []
+    monkeypatch.delenv("ROMANVOICE_SERVICE_TOKEN", raising=False)
+    monkeypatch.setattr(config_module.config, "SERVICE_TOKEN", "durable-secret")
+    monkeypatch.setattr(config_module.config, "SERVICE_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(
+        config_module,
+        "_protect_service_token_file",
+        protected_paths.append,
+    )
+
+    assert config_module.ensure_service_token() == "durable-secret"
+    assert protected_paths == [str(token_file)]
+
+
+def test_service_refuses_active_memory_and_file_token_drift(tmp_path, monkeypatch):
+    token_file = tmp_path / "service_token.txt"
+    token_file.write_text("rotated-file-secret\n", encoding="utf-8")
+    monkeypatch.delenv("ROMANVOICE_SERVICE_TOKEN", raising=False)
+    monkeypatch.setattr(config_module.config, "SERVICE_TOKEN", "stale-memory-secret")
+    monkeypatch.setattr(config_module.config, "SERVICE_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(
+        config_module,
+        "_protect_service_token_file",
+        lambda _path: None,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        RomanVoiceDictationService(SimpleNamespace())
+
+    message = str(caught.value)
+    assert "active service token" in message
+    assert "rotated-file-secret" not in message
+    assert "stale-memory-secret" not in message
+
+
 def test_windows_token_acl_is_exact_and_does_not_forward_service_token(
     tmp_path,
     monkeypatch,

@@ -18,6 +18,9 @@ def test_firewall_remediation_is_scoped_backed_up_and_reversible():
     assert "Get-BroadPythonPublicAllowRules" in script
     assert "function Disable-PersistentFirewallRules" in script
     assert "-PolicyStore PersistentStore" in script
+    assert "[switch]$DisableBroadPythonPublicRules" in script
+    assert "-not $DisableBroadPythonPublicRules" in script
+    assert "if ($DisableBroadPythonPublicRules)" in script
     assert "Disable-PersistentFirewallRules -Rules $broadRules" in script
     assert "Disable-PersistentFirewallRules -Rules $genericRules" in script
     assert "advfirewall import" in script

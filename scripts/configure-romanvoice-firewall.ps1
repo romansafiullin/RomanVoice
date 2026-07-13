@@ -4,7 +4,8 @@ param(
     [string]$RuleName = 'RomanVoice-Tailscale-TCP-8799',
     [string]$RuleDisplayName = 'RomanVoice Tailscale TCP 8799',
     [string]$PythonwPath = 'C:\Users\Roman\AppData\Local\Programs\Python\Python312\pythonw.exe',
-    [string]$TailscaleInterfaceAlias = 'Tailscale'
+    [string]$TailscaleInterfaceAlias = 'Tailscale',
+    [switch]$DisableBroadPythonPublicRules
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,6 +110,13 @@ if (-not (Test-IsAdministrator)) {
 if (-not (Test-Path -LiteralPath $PythonwPath)) {
     throw "RomanVoice Python executable not found: $PythonwPath"
 }
+if ($broadRules.Count -gt 0 -and -not $DisableBroadPythonPublicRules) {
+    throw (
+        'Broad Public Python allow rules were found. They are not proven to ' +
+        'belong only to RomanVoice. Re-run with -DisableBroadPythonPublicRules ' +
+        'only after reviewing the audit output and approving those exact rules.'
+    )
+}
 
 $backupDirectory = Join-Path $env:LOCALAPPDATA 'RomanVoice\firewall-backups'
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
@@ -136,7 +144,9 @@ New-NetFirewallRule `
     -InterfaceAlias $TailscaleInterfaceAlias `
     -Program $PythonwPath | Out-Null
 
-Disable-PersistentFirewallRules -Rules $broadRules
+if ($DisableBroadPythonPublicRules) {
+    Disable-PersistentFirewallRules -Rules $broadRules
+}
 Disable-PersistentFirewallRules -Rules $genericRules
 
 $scoped = Get-NetFirewallRule -Name $RuleName -ErrorAction Stop
@@ -144,5 +154,8 @@ if ($scoped.Enabled -ne 'True') {
     throw 'Scoped RomanVoice firewall rule did not enable successfully.'
 }
 Write-Output "Firewall backup: $backupPath"
-Write-Output 'Applied scoped Tailscale TCP 8799 rule and disabled the superseded Python312/RomanVoice allows.'
+Write-Output 'Applied scoped Tailscale TCP 8799 rule and disabled the superseded named RomanVoice allow.'
+if ($DisableBroadPythonPublicRules) {
+    Write-Output 'Explicitly disabled the reviewed broad Python Public allow rules.'
+}
 Write-Output "Rollback command: netsh advfirewall import `"$backupPath`""

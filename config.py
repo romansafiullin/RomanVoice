@@ -86,6 +86,17 @@ def _raise_for_service_token_source_mismatch(
         )
 
 
+def _raise_for_active_service_token_mismatch(
+    active_token: str,
+    file_token: str,
+) -> None:
+    if active_token and file_token and active_token != file_token:
+        raise RuntimeError(
+            "Refusing to start RomanVoice because the active service token "
+            "differs from the durable service token file"
+        )
+
+
 def _service_token_default() -> str:
     token_file = _service_token_file()
     environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
@@ -185,15 +196,27 @@ def _protect_service_token_file(token_file: str) -> None:
 
 
 def ensure_service_token() -> str:
+    token_file = config.SERVICE_TOKEN_FILE
     environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
-    file_token = _read_service_token_file(config.SERVICE_TOKEN_FILE)
+    file_token = _read_service_token_file(token_file)
     _raise_for_service_token_source_mismatch(environment_token, file_token)
+    _raise_for_active_service_token_mismatch(config.SERVICE_TOKEN, file_token)
+
+    if os.path.isfile(token_file):
+        try:
+            _protect_service_token_file(token_file)
+        except OSError as exc:
+            raise RuntimeError(
+                "Unable to verify the RomanVoice service token file protection"
+            ) from exc
+        file_token = _read_service_token_file(token_file)
+        _raise_for_service_token_source_mismatch(environment_token, file_token)
+        _raise_for_active_service_token_mismatch(config.SERVICE_TOKEN, file_token)
 
     if config.SERVICE_TOKEN:
         return config.SERVICE_TOKEN
 
     token = secrets.token_urlsafe(32)
-    token_file = config.SERVICE_TOKEN_FILE
     parent = os.path.dirname(token_file)
     temp_file = f"{token_file}.{secrets.token_hex(6)}.tmp"
     try:

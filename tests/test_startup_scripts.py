@@ -24,6 +24,7 @@ def test_background_launcher_checks_service_port_owner_before_starting_duplicate
     assert "$Process.ParentProcessId" in script
     assert "owned by non-preferred" in script
     assert "expected $venvPythonw" in script
+    assert "exit 4" in script
     assert "RomanVoiceEnsureRunning" in script
     assert "WaitOne([TimeSpan]::FromSeconds(10))" in script
     assert "$ensureMutex.ReleaseMutex()" in script
