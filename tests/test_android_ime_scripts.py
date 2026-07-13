@@ -19,7 +19,7 @@ def test_phone_installer_recovers_from_debug_signature_mismatch():
     )
 
     assert "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in script
-    assert "uninstall app.romanvoice.ime" in script
+    assert "uninstall $PackageName" in script
 
 
 def test_phone_installer_defaults_to_floating_mic_workflow():
@@ -34,15 +34,49 @@ def test_phone_installer_defaults_to_floating_mic_workflow():
     assert "enabled_accessibility_services \"$next\"" in script
     assert "not enabled by Android" in script
     assert "Resolve-NormalKeyboard" in script
-    preinstall_stop = "& $Adb shell am force-stop app.romanvoice.ime | Out-Null"
+    preinstall_stop = "& $Adb shell am force-stop $PackageName | Out-Null"
     assert script.index(preinstall_stop) < script.rindex("Install-DebugApk")
-    assert "ime set app.romanvoice.ime/.RomanVoiceImeService" in script
+    assert "ime set $PackageName/.RomanVoiceImeService" in script
     assert "if ($SetRomanVoiceKeyboard)" in script
     assert "[switch]$PreferLan" in script
     assert "function Resolve-TailscaleExe" in script
     assert "function Resolve-TailscaleIp" in script
     assert "Tailscale\\tailscale.exe" in script
     assert "ws://$Address`:8799/v1/transcribe/stream" in script
+
+
+def test_phone_installer_fails_closed_to_tailscale_and_preserves_endpoint():
+    script = (ANDROID_IME_ROOT / "install-to-connected-phone.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function Test-TailscaleHost" in script
+    assert "$bytes[0] -eq 100" in script
+    assert "$bytes[1] -ge 64 -and $bytes[1] -le 127" in script
+    assert "Test-TailscaleStreamUrl $ExistingStreamUrl" in script
+    assert "$StreamUrl = $ExistingStreamUrl" in script
+    assert "will not silently fall back to LAN" in script
+    assert "Assert-ApprovedStreamUrl $StreamUrl" in script
+    assert "$PreferLan -and (Test-PrivateLanHost $uri.DnsSafeHost)" in script
+    assert "Resolve-LanIp" in script
+
+
+def test_phone_installer_streams_secrets_without_temporary_token_files():
+    script = (ANDROID_IME_ROOT / "install-to-connected-phone.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function Write-AppPreferencesFromStdin" in script
+    assert "$Content | & $Adb shell $writeCommand" in script
+    assert "Set-Content" not in script
+    assert "& $Adb push" not in script
+    assert "rm -f $LegacyAndroidPreferencesPath" in script
+    assert "Remove-Item -LiteralPath $LegacyWindowsPreferencesPath -Force" in script
+    assert "chmod 700 shared_prefs" in script
+    assert "chmod 600 $PreferencesPath" in script
+    assert "Get-Sha256Fingerprint" in script
+    assert "$ReadbackTokenFingerprint -ne $TokenFingerprint" in script
+    assert "Token fingerprint verified: sha256:$TokenFingerprint" in script
 
 
 def test_phone_tile_health_checker_covers_host_heartbeat_and_accessibility_state():
@@ -52,11 +86,46 @@ def test_phone_tile_health_checker_covers_host_heartbeat_and_accessibility_state
 
     assert "/v1/phone/status" in script
     assert "enabled_accessibility_services" in script
-    assert "app.romanvoice.ime/app.romanvoice.ime.RomanVoiceFloatingService" in script
+    assert '$floatingComponent = "$PackageName/$PackageName.RomanVoiceFloatingService"' in script
     assert "STATE_UNAVAILABLE" not in script
     assert "RomanVoice Floating Mic accessibility service is not enabled" in script
     assert "Get-NetTCPConnection -LocalPort 8799" in script
     assert "0.0.0.0" in script
+
+
+def test_phone_tile_health_rejects_implicit_lan_and_probes_tailscale_path():
+    script = (PROJECT_ROOT / "scripts" / "check-phone-tile-health.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[switch]$AllowLanOnly" in script
+    assert "Test-TailscaleHost $streamUri.DnsSafeHost" in script
+    assert "and $AllowLanOnly" in script
+    assert "configured for LAN only" in script
+    assert "$TailscalePackageName = 'com.tailscale.ipn'" in script
+    assert "pidof $TailscalePackageName" in script
+    assert "dumpsys connectivity" in script
+    assert "Transports:\\s+VPN" in script
+    assert "always_on_vpn_app" in script
+    assert "function Invoke-PhoneWebSocketProbe" in script
+    assert "toybox nc" in script
+    assert "101\\s+Switching Protocols" in script
+    assert script.count("direct phone-to-service health could not be proven") == 2
+
+
+def test_phone_tile_health_compares_non_secret_token_fingerprints():
+    script = (PROJECT_ROOT / "scripts" / "check-phone-tile-health.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-Sha256Fingerprint $token" in script
+    assert "Get-Sha256Fingerprint $phoneToken" in script
+    assert "$phoneTokenFingerprint -eq $desktopTokenFingerprint" in script
+    assert "Phone and desktop token fingerprints match" in script
+    assert '"Authorization: Bearer $PhoneToken"' in script
+    assert "$request | & $AdbPath shell $remoteCommand" in script
+    assert "Write-Output $phoneToken" not in script
+    assert "Write-Output $token" not in script
 
 
 def test_android_manifest_declares_floating_accessibility_service():
