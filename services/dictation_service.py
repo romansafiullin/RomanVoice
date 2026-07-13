@@ -107,9 +107,9 @@ class RomanVoiceDictationService:
             else service_token_configuration()
         )
         if self._token_configuration.get("environment_file_mismatch"):
-            logger.warning(
-                "ROMANVOICE_SERVICE_TOKEN differs from the durable token file; "
-                "the environment value is active"
+            raise RuntimeError(
+                "Refusing to start RomanVoice because ROMANVOICE_SERVICE_TOKEN "
+                "differs from the durable service token file"
             )
         self.max_audio_bytes = int(
             (max_audio_mb if max_audio_mb is not None else config.SERVICE_MAX_AUDIO_MB)
@@ -918,9 +918,19 @@ class RomanVoiceDictationService:
                         if streamer is not None:
                             websocket.send_error("stream already started")
                             continue
-                        sample_rate = int(payload.get("sample_rate") or config.WHISPER_TARGET_SAMPLE_RATE)
-                        if sample_rate <= 0:
-                            websocket.send_error("sample_rate must be positive")
+                        sample_rate = payload.get(
+                            "sample_rate",
+                            config.WHISPER_TARGET_SAMPLE_RATE,
+                        )
+                        if (
+                            isinstance(sample_rate, bool)
+                            or not isinstance(sample_rate, int)
+                            or sample_rate != config.WHISPER_TARGET_SAMPLE_RATE
+                        ):
+                            websocket.send_error(
+                                "sample_rate must be "
+                                f"{config.WHISPER_TARGET_SAMPLE_RATE} Hz"
+                            )
                             continue
                         state["sample_rate"] = sample_rate
                         state["polish_mode"] = str(payload.get("polish") or "settings").lower()

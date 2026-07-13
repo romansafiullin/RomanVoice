@@ -600,6 +600,38 @@ def test_service_rejects_oversized_websocket_frame_before_payload_read():
         service.stop()
 
 
+def test_service_rejects_unsupported_or_malformed_stream_sample_rates():
+    controller = FakeController(FakeStreamingBackend())
+    service = RomanVoiceDictationService(
+        controller,
+        host="127.0.0.1",
+        port=0,
+        token="secret",
+    )
+    service.start()
+    try:
+        for sample_rate in (48000, 2**63, 0, -16000, 16000.0, "16000", True):
+            sock, response = open_websocket(
+                f"{service.base_url}/v1/transcribe/stream",
+                token="secret",
+            )
+            assert b" 101 " in response
+            assert recv_server_json(sock)["type"] == "ready"
+
+            send_text(sock, {"type": "start", "sample_rate": sample_rate})
+            error = recv_server_json(sock)
+            assert error == {
+                "type": "error",
+                "ok": False,
+                "error": "sample_rate must be 16000 Hz",
+            }
+            sock.close()
+    finally:
+        service.stop()
+
+    assert controller._active_transcription_backend is None
+
+
 def test_service_streams_pcm16_audio_with_bearer_token(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
     backend = FakeStreamingBackend()

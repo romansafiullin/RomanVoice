@@ -3,6 +3,7 @@ Configuration constants for the OpenWhisper application.
 """
 import os
 import secrets
+import subprocess
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
@@ -66,25 +67,128 @@ def _service_token_file() -> str:
     )
 
 
-def _service_token_default() -> str:
-    token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
-    if token:
-        return token
-
-    token_file = _service_token_file()
+def _read_service_token_file(token_file: str) -> str:
     try:
-        if os.path.exists(token_file):
-            with open(token_file, "r", encoding="utf-8") as handle:
-                token = handle.read().strip()
-            if token:
-                return token
+        with open(token_file, encoding="utf-8") as handle:
+            return handle.read().strip()
     except OSError:
-        pass
+        return ""
 
-    return ""
+
+def _raise_for_service_token_source_mismatch(
+    environment_token: str,
+    file_token: str,
+) -> None:
+    if environment_token and file_token and environment_token != file_token:
+        raise RuntimeError(
+            "Refusing to start RomanVoice because ROMANVOICE_SERVICE_TOKEN "
+            "differs from the durable service token file"
+        )
+
+
+def _service_token_default() -> str:
+    token_file = _service_token_file()
+    environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
+    file_token = _read_service_token_file(token_file)
+    _raise_for_service_token_source_mismatch(environment_token, file_token)
+    return environment_token or file_token
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+_WINDOWS_TOKEN_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$path = $env:ROMANVOICE_TOKEN_ACL_TARGET
+if ([string]::IsNullOrWhiteSpace($path)) {
+    throw 'RomanVoice token ACL target is missing.'
+}
+
+$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$allowedSids = @(
+    $currentUser,
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+)
+$grantArguments = @(
+    "*$($currentUser.Value):(F)",
+    '*S-1-5-18:(F)',
+    '*S-1-5-32-544:(F)'
+)
+& icacls.exe $path /inheritance:r /grant:r $grantArguments | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "icacls failed while protecting the RomanVoice token (exit $LASTEXITCODE)."
+}
+
+$readback = Get-Acl -LiteralPath $path
+$allowedValues = @($allowedSids | ForEach-Object { $_.Value })
+$actualValues = @(
+    $readback.Access | ForEach-Object {
+        $_.IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    }
+)
+$unexpected = @(
+    $readback.Access | Where-Object {
+        $sid = $_.IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        $sid -notin $allowedValues -or
+            $_.AccessControlType -ne 'Allow' -or
+            $_.FileSystemRights -ne 'FullControl'
+    }
+)
+$missing = @($allowedValues | Where-Object { $_ -notin $actualValues })
+if (
+    -not $readback.AreAccessRulesProtected -or
+    $unexpected.Count -gt 0 -or
+    $missing.Count -gt 0 -or
+    $actualValues.Count -ne $allowedValues.Count
+) {
+    throw 'RomanVoice token ACL verification failed.'
+}
+"""
+
+
+def _protect_service_token_file(token_file: str) -> None:
+    if not _is_windows():
+        os.chmod(token_file, 0o600)
+        return
+
+    child_environment = os.environ.copy()
+    child_environment.pop("ROMANVOICE_SERVICE_TOKEN", None)
+    child_environment["ROMANVOICE_TOKEN_ACL_TARGET"] = os.path.abspath(token_file)
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            _WINDOWS_TOKEN_ACL_SCRIPT,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=child_environment,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0:
+        raise OSError(
+            "Unable to protect the RomanVoice service token with the required "
+            f"Windows ACL (exit {completed.returncode})"
+        )
 
 
 def ensure_service_token() -> str:
+    environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
+    file_token = _read_service_token_file(config.SERVICE_TOKEN_FILE)
+    _raise_for_service_token_source_mismatch(environment_token, file_token)
+
     if config.SERVICE_TOKEN:
         return config.SERVICE_TOKEN
 
@@ -99,8 +203,9 @@ def ensure_service_token() -> str:
             handle.write(token + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _protect_service_token_file(temp_file)
         os.replace(temp_file, token_file)
-        os.chmod(token_file, 0o600)
+        _protect_service_token_file(token_file)
     except OSError as exc:
         try:
             os.remove(temp_file)
@@ -116,12 +221,7 @@ def ensure_service_token() -> str:
 def service_token_configuration() -> dict[str, bool | str]:
     """Return non-secret token custody information for diagnostics."""
     environment_token = os.environ.get("ROMANVOICE_SERVICE_TOKEN", "").strip()
-    file_token = ""
-    try:
-        with open(config.SERVICE_TOKEN_FILE, "r", encoding="utf-8") as handle:
-            file_token = handle.read().strip()
-    except OSError:
-        pass
+    file_token = _read_service_token_file(config.SERVICE_TOKEN_FILE)
 
     active_token = config.SERVICE_TOKEN
     if environment_token:
