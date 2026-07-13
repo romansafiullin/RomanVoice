@@ -267,6 +267,7 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "setPillState(color, true)" in source
     assert "scheduleIdleOverlayHide(RESTART_WINDOW_VISIBLE_MS)" in source
     assert "scheduleIdleOverlayHide(IDLE_NOTICE_VISIBLE_MS)" in source
+    assert "phase == RomanVoiceRecordingPhase.ERROR" in source
     assert 'setBusyControls("Finishing", PILL_COLOR_RECORDED)' in source
     assert 'failPreflight("Tap a text field first", "focused_field_missing", false)' in source
     assert "Toast.makeText(this, text, Toast.LENGTH_SHORT).show()" in source
@@ -441,6 +442,9 @@ def test_android_stream_client_uses_connect_timeout_and_ping_keepalive():
     assert "frame.opcode == 0xA" in source
     assert "outstandingPingAtMs = 0" in source
     assert "RomanVoice stream ping timed out" in source
+    assert "RomanVoiceKeepAlivePolicy.nextAction" in source
+    assert "Action.WAIT" in source
+    assert 'setEndpointIdentificationAlgorithm("HTTPS")' in source
 
 
 def test_android_stream_client_validates_handshake_and_caps_untrusted_input():

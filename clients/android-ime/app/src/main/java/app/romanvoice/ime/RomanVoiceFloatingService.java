@@ -1312,7 +1312,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private void scheduleIdleOverlayHide(long delayMs) {
         cancelIdleOverlayHide();
         hideIdleOverlayRunnable = () -> {
-            if (phase == RomanVoiceRecordingPhase.IDLE && overlayView != null) {
+            if ((phase == RomanVoiceRecordingPhase.IDLE
+                    || phase == RomanVoiceRecordingPhase.ERROR)
+                    && overlayView != null) {
                 overlayView.setVisibility(View.GONE);
             }
             hideIdleOverlayRunnable = null;

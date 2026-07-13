@@ -18,8 +18,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 final class RomanVoiceStreamClient implements Closeable {
@@ -87,8 +90,12 @@ final class RomanVoiceStreamClient implements Closeable {
                 : new Socket();
         socket.connect(new InetSocketAddress(uri.getHost(), port), CONNECT_TIMEOUT_MS);
         socket.setSoTimeout(CONNECT_TIMEOUT_MS);
-        if ("wss".equalsIgnoreCase(scheme) && socket instanceof javax.net.ssl.SSLSocket) {
-            ((javax.net.ssl.SSLSocket) socket).startHandshake();
+        if ("wss".equalsIgnoreCase(scheme) && socket instanceof SSLSocket) {
+            SSLSocket secureSocket = (SSLSocket) socket;
+            SSLParameters parameters = secureSocket.getSSLParameters();
+            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            secureSocket.setSSLParameters(parameters);
+            secureSocket.startHandshake();
         }
         input = socket.getInputStream();
         output = socket.getOutputStream();
@@ -259,11 +266,16 @@ final class RomanVoiceStreamClient implements Closeable {
                 if (closed) {
                     return;
                 }
-                long now = System.currentTimeMillis();
+                long now = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
                 long sentAt = outstandingPingAtMs;
-                if (sentAt > 0 && now - sentAt > PONG_TIMEOUT_MS) {
+                RomanVoiceKeepAlivePolicy.Action action =
+                        RomanVoiceKeepAlivePolicy.nextAction(now, sentAt, PONG_TIMEOUT_MS);
+                if (action == RomanVoiceKeepAlivePolicy.Action.TIMEOUT) {
                     notifyUnexpectedDisconnect("RomanVoice stream ping timed out");
                     return;
+                }
+                if (action == RomanVoiceKeepAlivePolicy.Action.WAIT) {
+                    continue;
                 }
                 outstandingPingAtMs = now;
                 sendFrame(0x9, new byte[]{});
