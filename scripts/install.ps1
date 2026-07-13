@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot   = Split-Path -Parent $PSScriptRoot
 $scriptsDir = Join-Path $repoRoot 'scripts'
-$venvPython = Join-Path $repoRoot 'venv\Scripts\pythonw.exe'
+$venvPython = Join-Path $repoRoot '.venv\Scripts\pythonw.exe'
 
 function Format-PathEntry {
     param([string]$Path)
@@ -19,14 +19,12 @@ if (-not (Test-Path $venvPython)) {
     Write-Host '[error] Virtual environment not found.' -ForegroundColor Red
     Write-Host "        Expected: $venvPython"
     Write-Host ''
-    Write-Host 'Create the venv first, then re-run install.cmd:'
-    Write-Host '    python -m venv venv'
-    Write-Host '    venv\Scripts\activate'
-    Write-Host '    pip install -r requirements.txt'
+    Write-Host 'Sync the supported Python 3.12 environment, then re-run install.cmd:'
+    Write-Host '    uv sync --python 3.12'
     Write-Host ''
     exit 1
 }
-Write-Host "[ok] venv found at $venvPython"
+Write-Host "[ok] RomanVoice environment found at $venvPython"
 
 $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $entries = @()

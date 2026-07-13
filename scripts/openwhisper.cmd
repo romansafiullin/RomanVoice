@@ -1,11 +1,4 @@
 @echo off
 rem Backward-compatible RomanVoice background launcher.
-
-setlocal
-set "REPO=%~dp0.."
-
-cd /d "%REPO%"
-set ROMANVOICE_START_HIDDEN=1
-set ROMANVOICE_ENABLE_GLOBAL_HOTKEYS=1
-start "RomanVoice" /B uv run --python 3.12 pythonw app_qt.py %*
-endlocal
+call "%~dp0romanvoice.cmd" %*
+exit /b %ERRORLEVEL%

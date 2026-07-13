@@ -19,8 +19,12 @@ scripts\romanvoice.cmd
 ```
 
 `scripts\romanvoice.cmd` is the everyday background launcher: it starts hidden
-to tray with global hotkeys enabled. Use `scripts\romanvoice-ui.cmd` only when
-you explicitly want the full window for settings, history, or debugging.
+to tray with global hotkeys enabled and delegates to the same duplicate-safe
+startup check as the watchdog. Use `scripts\romanvoice-ui.cmd` only when you
+explicitly want the full window for settings, history, or debugging. Because
+RomanVoice does not have cross-process UI activation, exit the tray instance
+before using the explicit UI launcher; otherwise two app processes can compete
+for the hotkey and service port.
 
 To keep RomanVoice running after login and restart it if it exits, install the
 background watchdog:
@@ -210,7 +214,11 @@ ow              # short alias
 openwhisper     # full name
 ```
 
-The launcher invokes `venv\Scripts\pythonw.exe` directly, so the app always uses the project's venv regardless of which environment your shell has activated. Code changes are picked up live — no reinstall needed after `git pull`.
+The launcher delegates to the RomanVoice startup check, which prefers
+`.venv\Scripts\pythonw.exe` and falls back to `uv run --python 3.12` only when
+the synced environment is missing. This keeps command-line launches aligned
+with the background watchdog, including duplicate prevention and phone-service
+binding. Code changes are picked up live, with no reinstall after `git pull`.
 
 ### Uninstall
 
