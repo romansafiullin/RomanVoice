@@ -620,6 +620,9 @@ def test_android_surfaces_fail_closed_and_probe_auth_before_claiming_ready():
     assert "allowLanStream && isPrivateLanHost(normalizedHost)" in preferences
     assert "checkIdleServiceHealth();" in floating
     assert "requestHealthCheckForTile()" in floating
+    assert "lastSuccessfulHealthCheckElapsedMs" in floating
+    assert "!service.isIdleHealthFresh()" in floating
+    assert "SystemClock.elapsedRealtime() - lastSuccess < PHONE_HEARTBEAT_INTERVAL_MS" in floating
     assert "if (phase == RomanVoiceRecordingPhase.IDLE)" in floating
     assert 'healthUrl.append("/v1/health")' in floating
     assert '"Authorization", "Bearer " + token.trim()' in floating

@@ -76,6 +76,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private volatile int clientGeneration;
     private volatile int verifiedConnectionGeneration = -1;
     private volatile boolean idleHealthCheck;
+    private volatile long lastSuccessfulHealthCheckElapsedMs;
     private volatile String retryFailureNotice = "";
     private long lastTileToggleElapsedMs;
 
@@ -123,7 +124,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     static void requestHealthCheckForTile() {
         RomanVoiceFloatingService service = activeService;
-        if (service != null && service.phase == RomanVoiceRecordingPhase.IDLE) {
+        if (service != null
+                && service.phase == RomanVoiceRecordingPhase.IDLE
+                && !service.isIdleHealthFresh()) {
             service.checkIdleServiceHealth();
         }
     }
@@ -526,6 +529,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                         return;
                     }
                     idleHealthCheck = false;
+                    lastSuccessfulHealthCheckElapsedMs = SystemClock.elapsedRealtime();
                     retryFailureNotice = "";
                     failureNotice = "";
                     boolean keepOverlayHidden = overlayView == null
@@ -541,6 +545,12 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 }
             });
         }, "RomanVoiceFloatHealth").start();
+    }
+
+    private boolean isIdleHealthFresh() {
+        long lastSuccess = lastSuccessfulHealthCheckElapsedMs;
+        return lastSuccess > 0
+                && SystemClock.elapsedRealtime() - lastSuccess < PHONE_HEARTBEAT_INTERVAL_MS;
     }
 
     private void scheduleTileFocusRetry(int retriesRemaining) {
