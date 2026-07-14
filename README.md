@@ -55,20 +55,36 @@ Runtime data is stored under app-data paths:
 - `%LOCALAPPDATA%\RomanVoice\romanvoice.log`
 
 RomanVoice also starts a dictation service from the same tray/background
-process. It is intended for Roman PA v2 and trusted clients such as the Pixel
+process. It is intended for Roman PA V3 and trusted clients such as the Pixel
 IME, so the loaded Whisper model stays owned by one process. The config default
 is loopback-only at `http://127.0.0.1:8799`; the background launcher sets
-`ROMANVOICE_SERVICE_HOST=0.0.0.0` so the Pixel can reach it on the local
-network. `/v1/transcribe` and streaming requests require
+`ROMANVOICE_SERVICE_HOST=0.0.0.0` so the Pixel can reach it through the private
+Tailscale network. A home-LAN endpoint is supported only as an explicit
+developer diagnostic. `/v1/transcribe` and streaming requests require
 `Authorization: Bearer <token>`. The token is read from
-`ROMANVOICE_SERVICE_TOKEN` when set, otherwise RomanVoice creates and reuses
-`%APPDATA%\RomanVoice\service_token.txt`.
+`ROMANVOICE_SERVICE_TOKEN` when set, otherwise RomanVoice creates and reuses the
+durable `%APPDATA%\RomanVoice\service_token.txt`. If both sources are present
+and differ, service startup fails closed instead of silently choosing one.
 
 The same service exposes `GET /v1/transcribe/stream` as an authenticated
 WebSocket endpoint for live clients such as the Android IME in
 `clients/android-ime`. Streaming clients send PCM16 mono chunks after a JSON
 `start` message; RomanVoice sends replacement `partial` messages and a `final`
 message after `stop`.
+
+Provision the connected Pixel and verify its authenticated Tailscale path from
+the repo root:
+
+```powershell
+.\clients\android-ime\build-debug-apk.ps1
+.\clients\android-ime\install-to-connected-phone.ps1
+.\scripts\check-phone-tile-health.ps1
+```
+
+Custody and firewall maintenance use
+`scripts\rotate-romanvoice-service-token.ps1` and
+`scripts\configure-romanvoice-firewall.ps1`. Review their help before applying
+changes.
 
 The Android client can run either as a standalone RomanVoice keyboard or as an
 opt-in floating mic accessibility service. The floating path keeps the normal

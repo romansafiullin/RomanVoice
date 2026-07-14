@@ -13,9 +13,12 @@ RomanVoice button inserts dictated text into the focused editable field.
 The preferred phone trigger is the RomanVoice Quick Settings tile. Add the tile
 from RomanVoice Settings or Android's notification shade editor, then tap it to
 start listening and tap it again to stop and insert. The tile shows `Connecting`,
-`Listening`, or `Ready`. The floating service still needs to be enabled because
-it owns focused-field insertion, but its overlay stays hidden while idle and
-only appears while recording as a small status/cancel pill.
+`Listening`, `Ready`, or a persistent actionable error. `Ready` follows an
+authenticated service preflight. Tap an error state to retry, and tap an active
+connecting, listening, or finishing state to cancel or stop as appropriate. The
+floating service still needs to be enabled because it owns focused-field
+insertion, but its overlay stays hidden while idle and appears during active
+work as a small status/cancel pill.
 
 ## Service URL
 
