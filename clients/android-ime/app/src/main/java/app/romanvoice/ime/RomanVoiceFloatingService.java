@@ -76,8 +76,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     private volatile int clientGeneration;
     private volatile int verifiedConnectionGeneration = -1;
     private volatile boolean idleHealthCheck;
+    private volatile boolean retryableIdleHealthFailure;
     private volatile long lastSuccessfulHealthCheckElapsedMs;
     private volatile String retryFailureNotice = "";
+    private volatile String failureReason = "";
     private long lastTileToggleElapsedMs;
 
     private int insertionStart = 0;
@@ -173,8 +175,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
-        stopRecording(false);
-        reportPhoneHeartbeat("destroyed", false);
+        stopRecording(false, false);
+        reportPhoneHeartbeat("destroyed", false, false, false, "destroyed");
         cancelPhoneHeartbeat();
         clearPhaseWatchdogs();
         removeOverlay();
@@ -365,6 +367,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (phase != RomanVoiceRecordingPhase.IDLE) {
             return;
         }
+        retryableIdleHealthFailure = false;
+        failureReason = "";
         cancelIdleOverlayHide();
         if (!hasRecordPermission()) {
             cancelTileFocusRetry();
@@ -458,7 +462,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void failPreflight(String message, String event, boolean openSettingsPage) {
         invalidateSession(RomanVoiceRecordingPhase.ERROR);
+        retryableIdleHealthFailure = false;
         retryFailureNotice = "";
+        failureReason = event;
         failureNotice = message;
         setRecordingControls(false);
         showFailureNotice(message);
@@ -470,6 +476,18 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void checkIdleServiceHealth() {
+        checkIdleServiceHealth(false);
+    }
+
+    private void retryIdleServiceHealth() {
+        if (phase != RomanVoiceRecordingPhase.ERROR || !retryableIdleHealthFailure) {
+            return;
+        }
+        invalidateSession(RomanVoiceRecordingPhase.IDLE);
+        checkIdleServiceHealth(true);
+    }
+
+    private void checkIdleServiceHealth(boolean backgroundRetry) {
         if (phase != RomanVoiceRecordingPhase.IDLE) {
             return;
         }
@@ -493,6 +511,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         new Thread(() -> {
             HttpURLConnection connection = null;
             String failure = null;
+            String errorReason = "";
+            boolean retryableFailure = false;
             try {
                 URI uri = URI.create(streamUrl);
                 String scheme = "wss".equalsIgnoreCase(uri.getScheme()) ? "https" : "http";
@@ -511,11 +531,22 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 int code = connection.getResponseCode();
                 if (code == 401 || code == 403) {
                     failure = RomanVoiceConnectionMessage.AUTH_FAILED;
+                    errorReason = "idle_health_auth_failed";
                 } else if (code != 200) {
                     failure = "RomanVoice unavailable (HTTP " + code + ")";
+                    errorReason = "idle_health_http_" + code;
+                    retryableFailure = isRetryableIdleHealthHttpCode(code);
                 }
             } catch (Exception exception) {
                 failure = RomanVoiceConnectionMessage.from(exception);
+                if (RomanVoiceConnectionMessage.NETWORK_FAILED.equals(failure)) {
+                    errorReason = "idle_health_network_failed";
+                    retryableFailure = true;
+                } else if (RomanVoiceConnectionMessage.AUTH_FAILED.equals(failure)) {
+                    errorReason = "idle_health_auth_failed";
+                } else {
+                    errorReason = "idle_health_stream_failed";
+                }
             } finally {
                 if (connection != null) {
                     connection.disconnect();
@@ -523,14 +554,18 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             }
 
             String finalFailure = failure;
+            String finalErrorReason = errorReason;
+            boolean finalRetryableFailure = retryableFailure;
             mainHandler.post(() -> {
                 if (finalFailure == null) {
                     if (!completeSession(generation, RomanVoiceRecordingPhase.IDLE)) {
                         return;
                     }
                     idleHealthCheck = false;
+                    retryableIdleHealthFailure = false;
                     lastSuccessfulHealthCheckElapsedMs = SystemClock.elapsedRealtime();
                     retryFailureNotice = "";
+                    failureReason = "";
                     failureNotice = "";
                     boolean keepOverlayHidden = overlayView == null
                             || overlayView.getVisibility() != View.VISIBLE;
@@ -541,10 +576,25 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                     notifyTileStateChanged();
                     reportPhoneHeartbeat("ready");
                 } else if (isCurrentSession(generation, RomanVoiceRecordingPhase.CONNECTING)) {
-                    handleStreamError(generation, finalFailure, "idle_health_failed");
+                    handleStreamError(
+                            generation,
+                            finalFailure,
+                            "idle_health_failed",
+                            finalErrorReason,
+                            finalRetryableFailure,
+                            backgroundRetry
+                    );
                 }
             });
         }, "RomanVoiceFloatHealth").start();
+    }
+
+    private static boolean isRetryableIdleHealthHttpCode(int code) {
+        return code == 408
+                || code == 429
+                || code == 502
+                || code == 503
+                || code == 504;
     }
 
     private boolean isIdleHealthFresh() {
@@ -671,6 +721,10 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void stopRecording(boolean requestFinal) {
+        stopRecording(requestFinal, true);
+    }
+
+    private void stopRecording(boolean requestFinal, boolean reportReady) {
         cancelTileFocusRetry();
         boolean wasRecording = isRecording();
         int generation = sessionGeneration;
@@ -720,7 +774,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 setRecordingControls(false);
                 setStatus("Ready");
                 notifyTileStateChanged();
-                if (wasRecording) {
+                if (wasRecording && reportReady) {
                     reportPhoneHeartbeat("ready");
                 }
             });
@@ -729,6 +783,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
 
     private void cancelRecording() {
         cancelTileFocusRetry();
+        retryableIdleHealthFailure = false;
         boolean canceledHealthCheck = idleHealthCheck;
         idleHealthCheck = false;
         boolean canceledUnverifiedRetry = !canceledHealthCheck
@@ -753,6 +808,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         failureNotice = canceledHealthCheck
                 ? "Connection check canceled - tap to retry"
                 : (canceledUnverifiedRetry ? restoredFailure : "");
+        failureReason = canceledHealthCheck
+                ? "idle_health_canceled"
+                : (canceledUnverifiedRetry ? "connection_retry_canceled" : "");
         if (canceledHealthCheck || canceledUnverifiedRetry) {
             showFailureNotice(failureNotice);
         } else if (wasBusy || hadClient) {
@@ -816,6 +874,8 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         if (!completeSession(generation, RomanVoiceRecordingPhase.IDLE)) {
             return;
         }
+        retryableIdleHealthFailure = false;
+        failureReason = "";
         failureNotice = "";
         setRecordingControls(false);
         setStatus(finalText.isEmpty() ? "No speech" : "Ready");
@@ -826,6 +886,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void handleStreamError(int generation, String message, String event) {
+        handleStreamError(generation, message, event, event, false, false);
+    }
+
+    private void handleStreamError(
+            int generation,
+            String message,
+            String event,
+            String errorReason,
+            boolean retryableFailure,
+            boolean suppressRetryableNotice
+    ) {
         if (!completeSession(generation, RomanVoiceRecordingPhase.ERROR)) {
             return;
         }
@@ -837,8 +908,20 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         failureNotice = message == null || message.isEmpty()
                 ? CONNECTION_FAILED_NOTICE
                 : message;
+        failureReason = errorReason == null ? "" : errorReason;
+        // Keep auth, configuration, stream, and device failures latched for explicit action.
+        // Only explicitly classified transient failures from the idle probe may retry themselves.
+        retryableIdleHealthFailure = "idle_health_failed".equals(event)
+                && retryableFailure;
+        boolean showFailure = !suppressRetryableNotice || !retryableIdleHealthFailure;
+        boolean keepOverlayHidden = !showFailure
+                && (overlayView == null || overlayView.getVisibility() != View.VISIBLE);
         setRecordingControls(false);
-        showFailureNotice(failureNotice);
+        if (showFailure) {
+            showFailureNotice(failureNotice);
+        } else if (keepOverlayHidden && overlayView != null) {
+            overlayView.setVisibility(View.GONE);
+        }
         resetLiveDictationState();
         notifyTileStateChanged();
         reportPhoneHeartbeat(event, false);
@@ -1346,6 +1429,9 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             public void run() {
                 if (phase == RomanVoiceRecordingPhase.IDLE) {
                     checkIdleServiceHealth();
+                } else if (phase == RomanVoiceRecordingPhase.ERROR
+                        && retryableIdleHealthFailure) {
+                    retryIdleServiceHealth();
                 } else {
                     reportPhoneHeartbeat("heartbeat");
                 }
@@ -1372,13 +1458,26 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void reportPhoneHeartbeat(String event, boolean available) {
+        reportPhoneHeartbeat(event, available, true, available, failureReason);
+    }
+
+    private void reportPhoneHeartbeat(
+            String event,
+            boolean available,
+            boolean serviceAlive,
+            boolean backendReady,
+            String errorReason
+    ) {
         RomanVoicePhoneHeartbeat.reportAsync(
                 this,
                 "floating",
                 event,
                 available,
+                serviceAlive,
+                backendReady,
                 phase == RomanVoiceRecordingPhase.RECORDING,
-                phase == RomanVoiceRecordingPhase.CONNECTING
+                phase == RomanVoiceRecordingPhase.CONNECTING,
+                errorReason
         );
     }
 

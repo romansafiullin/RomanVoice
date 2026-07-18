@@ -22,15 +22,28 @@ final class RomanVoicePhoneHeartbeat {
             String surface,
             String event,
             boolean available,
+            boolean serviceAlive,
+            boolean backendReady,
             boolean recording,
-            boolean connecting
+            boolean connecting,
+            String errorReason
     ) {
         if (context == null) {
             return;
         }
         Context appContext = context.getApplicationContext();
         new Thread(
-                () -> report(appContext, surface, event, available, recording, connecting),
+                () -> report(
+                        appContext,
+                        surface,
+                        event,
+                        available,
+                        serviceAlive,
+                        backendReady,
+                        recording,
+                        connecting,
+                        errorReason
+                ),
                 "RomanVoicePhoneHeartbeat"
         ).start();
     }
@@ -40,8 +53,11 @@ final class RomanVoicePhoneHeartbeat {
             String surface,
             String event,
             boolean available,
+            boolean serviceAlive,
+            boolean backendReady,
             boolean recording,
-            boolean connecting
+            boolean connecting,
+            String errorReason
     ) {
         String streamUrl = RomanVoicePreferences.streamUrl(context);
         String token = RomanVoicePreferences.token(context);
@@ -61,8 +77,11 @@ final class RomanVoicePhoneHeartbeat {
             payload.put("surface", surface == null ? "" : surface);
             payload.put("event", event == null ? "" : event);
             payload.put("available", available);
+            payload.put("service_alive", serviceAlive);
+            payload.put("backend_ready", backendReady);
             payload.put("recording", recording);
             payload.put("connecting", connecting);
+            payload.put("error_reason", errorReason == null ? "" : errorReason);
             byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
             connection = (HttpURLConnection) heartbeatUrl.openConnection();

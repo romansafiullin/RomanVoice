@@ -102,7 +102,10 @@ public class RomanVoiceTileService extends TileService {
                         "floating_service_unavailable",
                         false,
                         false,
-                        false
+                        false,
+                        false,
+                        false,
+                        "floating_service_unavailable"
                 );
                 break;
         }

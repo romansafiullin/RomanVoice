@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from config import config
+import services.dictation_service as dictation_service_module
 from services.dictation_service import RomanVoiceDictationService
 from services.websocket_protocol import make_client_frame
 
@@ -485,6 +486,12 @@ def test_service_tracks_phone_floating_heartbeat_status():
             token="secret",
         )
         detailed = get_json(f"{base_url}/v1/health", token="secret")
+        legacy_last_seen = float(service._phone_status["last_seen_at_epoch"])
+        legacy_old = service._phone_status_payload(
+            now=legacy_last_seen
+            + dictation_service_module._PHONE_HEARTBEAT_STALE_SECONDS
+            + 1
+        )
     finally:
         service.stop()
 
@@ -496,6 +503,9 @@ def test_service_tracks_phone_floating_heartbeat_status():
     assert inactive["phone"]["status"] == "inactive"
     assert inactive["phone"]["ok"] is False
     assert inactive["phone"]["event"] == "floating_service_unavailable"
+    assert "service_alive" not in inactive["phone"]
+    assert "backend_ready" not in inactive["phone"]
+    assert legacy_old["status"] == "inactive"
     assert detailed["phone"]["status"] == "inactive"
     assert detailed["runtime"]["pid"] > 0
     assert detailed["runtime"]["executable"]
@@ -512,6 +522,98 @@ def test_service_tracks_phone_floating_heartbeat_status():
     assert detailed["http_decode_profile"]["vad_filter"] == (
         config.SERVICE_HTTP_FASTER_WHISPER_VAD_ENABLED
     )
+
+
+def test_service_distinguishes_phone_liveness_from_backend_readiness():
+    controller = FakeController()
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    base_url = service.base_url
+    try:
+        degraded = post_json(
+            f"{base_url}/v1/phone/heartbeat",
+            {
+                "surface": "floating",
+                "event": "idle_health_failed",
+                "available": False,
+                "service_alive": True,
+                "backend_ready": False,
+                "recording": False,
+                "connecting": False,
+                "error_reason": "idle_health_network_failed",
+            },
+            token="secret",
+        )
+        ready = post_json(
+            f"{base_url}/v1/phone/heartbeat",
+            {
+                "surface": "floating",
+                "event": "ready",
+                "available": False,
+                "service_alive": True,
+                "backend_ready": True,
+                "recording": False,
+                "connecting": False,
+                "error_reason": "",
+            },
+            token="secret",
+        )
+        inactive = post_json(
+            f"{base_url}/v1/phone/heartbeat",
+            {
+                "surface": "tile",
+                "event": "floating_service_unavailable",
+                "available": True,
+                "service_alive": False,
+                "backend_ready": False,
+                "recording": False,
+                "connecting": False,
+                "error_reason": "floating_service_unavailable",
+            },
+            token="secret",
+        )
+    finally:
+        service.stop()
+
+    assert degraded["phone"]["status"] == "degraded"
+    assert degraded["phone"]["ok"] is False
+    assert degraded["phone"]["service_alive"] is True
+    assert degraded["phone"]["backend_ready"] is False
+    assert degraded["phone"]["error_reason"] == "idle_health_network_failed"
+    assert ready["phone"]["status"] == "ok"
+    assert ready["phone"]["ok"] is True
+    assert ready["phone"]["available"] is False
+    assert inactive["phone"]["status"] == "inactive"
+    assert inactive["phone"]["ok"] is False
+    assert inactive["phone"]["available"] is True
+
+
+def test_service_liveness_contract_marks_old_heartbeats_stale_before_inactive():
+    controller = FakeController()
+    service = RomanVoiceDictationService(controller, host="127.0.0.1", port=0, token="secret")
+    service.start()
+    try:
+        post_json(
+            f"{service.base_url}/v1/phone/heartbeat",
+            {
+                "surface": "tile",
+                "event": "floating_service_unavailable",
+                "available": False,
+                "service_alive": False,
+                "backend_ready": False,
+            },
+            token="secret",
+        )
+        last_seen = float(service._phone_status["last_seen_at_epoch"])
+        stale = service._phone_status_payload(
+            now=last_seen + dictation_service_module._PHONE_HEARTBEAT_STALE_SECONDS + 1
+        )
+    finally:
+        service.stop()
+
+    assert stale["status"] == "stale"
+    assert stale["ok"] is False
+    assert stale["service_alive"] is False
 
 
 def test_service_rejects_unauthenticated_phone_status_and_heartbeat():
@@ -766,8 +868,6 @@ def test_service_streaming_runs_final_pass_when_rolling_worker_times_out(
 ):
     monkeypatch.setattr(config, "RECORDINGS_FOLDER", str(tmp_path))
     monkeypatch.setattr(config, "PHONE_STREAM_FINAL_PASS_ENABLED", False)
-    import services.dictation_service as dictation_service_module
-
     monkeypatch.setattr(
         dictation_service_module,
         "StreamingTranscriber",

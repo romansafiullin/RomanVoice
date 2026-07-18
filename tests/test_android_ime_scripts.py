@@ -277,7 +277,7 @@ def test_floating_service_has_tile_hook_and_cancel_path():
     assert "Toast.makeText(this, text, Toast.LENGTH_LONG).show()" in source
     assert "PHONE_HEARTBEAT_INTERVAL_MS" in source
     assert "startPhoneHeartbeat()" in source
-    assert "reportPhoneHeartbeat(\"destroyed\", false)" in source
+    assert 'reportPhoneHeartbeat("destroyed", false, false, false, "destroyed")' in source
     assert '"connection_failed"' in source
     assert "reportPhoneHeartbeat(event, false)" in source
 
@@ -301,6 +301,32 @@ def test_android_phone_heartbeat_posts_to_host_service():
     assert 'payload.put("surface"' in source
     assert 'payload.put("event"' in source
     assert 'payload.put("available"' in source
+    assert 'payload.put("service_alive"' in source
+    assert 'payload.put("backend_ready"' in source
+    assert 'payload.put("error_reason"' in source
+
+
+def test_floating_destroy_does_not_queue_ready_heartbeat():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "public void onDestroy() {\n        stopRecording(false, false);" in source
+    assert (
+        "private void stopRecording(boolean requestFinal) {\n"
+        "        stopRecording(requestFinal, true);\n"
+        "    }"
+    ) in source
+    assert "private void stopRecording(boolean requestFinal, boolean reportReady)" in source
+    assert "if (wasRecording && reportReady)" in source
 
 
 def test_floating_service_retries_focus_after_quick_settings_tile():
@@ -632,7 +658,7 @@ def test_android_surfaces_fail_closed_and_probe_auth_before_claiming_ready():
     assert '"Authorization", "Bearer " + token.trim()' in floating
     assert "completeSession(generation, RomanVoiceRecordingPhase.IDLE)" in floating
     assert "keepOverlayHidden" in floating
-    assert 'handleStreamError(generation, finalFailure, "idle_health_failed")' in floating
+    assert '"idle_health_failed",\n                            finalErrorReason' in floating
     assert "retryFailureNotice = failureNotice" in floating
     assert "canceledUnverifiedRetry" in floating
     assert "markConnectionVerified(generation)" in floating
@@ -833,3 +859,110 @@ def test_floating_failure_heartbeats_report_unavailable():
 
     assert "reportPhoneHeartbeat(event, false)" in source
     assert "phase != RomanVoiceRecordingPhase.ERROR" in source
+
+
+def test_floating_service_retries_only_transient_idle_health_failures():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "private volatile boolean retryableIdleHealthFailure;" in source
+    assert 'retryableIdleHealthFailure = "idle_health_failed".equals(event)' in source
+    assert "&& retryableFailure;" in source
+    assert (
+        "phase == RomanVoiceRecordingPhase.ERROR\n"
+        "                        && retryableIdleHealthFailure"
+    ) in source
+    assert "retryIdleServiceHealth();" in source
+    assert "checkIdleServiceHealth(true);" in source
+    assert (
+        'handleStreamError(\n'
+        '                            generation,\n'
+        '                            finalFailure,\n'
+        '                            "idle_health_failed",\n'
+        '                            finalErrorReason,\n'
+        '                            finalRetryableFailure,\n'
+        '                            backgroundRetry'
+    ) in source
+
+
+def test_floating_idle_health_retries_only_machine_classified_transients():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert 'errorReason = "idle_health_network_failed";' in source
+    assert 'errorReason = "idle_health_auth_failed";' in source
+    assert 'errorReason = "idle_health_http_" + code;' in source
+    for code in (408, 429, 502, 503, 504):
+        assert f"code == {code}" in source
+    assert "retryableFailure = isRetryableIdleHealthHttpCode(code);" in source
+
+
+def test_floating_and_tile_heartbeat_call_sites_report_service_liveness():
+    floating = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+    tile = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceTileService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "reportPhoneHeartbeat(event, available, true, available, failureReason);" in floating
+    assert 'reportPhoneHeartbeat("destroyed", false, false, false, "destroyed")' in floating
+    assert '"floating_service_unavailable"' in tile
+
+
+def test_background_idle_health_retries_preserve_failure_ui_contract():
+    source = (
+        ANDROID_IME_ROOT
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "app"
+        / "romanvoice"
+        / "ime"
+        / "RomanVoiceFloatingService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "boolean suppressRetryableNotice" in source
+    assert (
+        "boolean showFailure = !suppressRetryableNotice || !retryableIdleHealthFailure;"
+        in source
+    )
+    assert "boolean keepOverlayHidden = !showFailure" in source
+    assert "if (showFailure)" in source
+    assert "overlayView.setVisibility(View.GONE);" in source
+    assert source.count("retryableIdleHealthFailure = false;") >= 4

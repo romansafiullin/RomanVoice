@@ -359,15 +359,24 @@ class RomanVoiceDictationService:
             "recording": bool(payload.get("recording", False)),
             "connecting": bool(payload.get("connecting", False)),
         }
+        if "service_alive" in payload and "backend_ready" in payload:
+            status["service_alive"] = bool(payload.get("service_alive"))
+            status["backend_ready"] = bool(payload.get("backend_ready"))
+        if "error_reason" in payload:
+            status["error_reason"] = str(payload.get("error_reason") or "")[:128]
         with self._phone_lock:
             self._phone_status = status
         logger.info(
-            "RomanVoice phone heartbeat surface=%s event=%s available=%s recording=%s connecting=%s",
+            "RomanVoice phone heartbeat surface=%s event=%s available=%s "
+            "service_alive=%s backend_ready=%s recording=%s connecting=%s error_reason=%s",
             status["surface"],
             status["event"],
             status["available"],
+            status.get("service_alive"),
+            status.get("backend_ready"),
             status["recording"],
             status["connecting"],
+            status.get("error_reason", ""),
         )
         return self._phone_status_response(now=now)
 
@@ -1112,13 +1121,24 @@ class RomanVoiceDictationService:
 
         last_seen = float(status.get("last_seen_at_epoch") or 0.0)
         age = max(0.0, current_time - last_seen) if last_seen else None
-        available = bool(status.get("available", False))
-        if not available:
-            phone_status = "inactive"
-        elif age is not None and age > _PHONE_HEARTBEAT_STALE_SECONDS:
-            phone_status = "stale"
+        has_liveness_contract = "service_alive" in status and "backend_ready" in status
+        if has_liveness_contract:
+            if age is not None and age > _PHONE_HEARTBEAT_STALE_SECONDS:
+                phone_status = "stale"
+            elif not bool(status.get("service_alive")):
+                phone_status = "inactive"
+            elif not bool(status.get("backend_ready")):
+                phone_status = "degraded"
+            else:
+                phone_status = "ok"
         else:
-            phone_status = "ok"
+            available = bool(status.get("available", False))
+            if not available:
+                phone_status = "inactive"
+            elif age is not None and age > _PHONE_HEARTBEAT_STALE_SECONDS:
+                phone_status = "stale"
+            else:
+                phone_status = "ok"
 
         status.update(
             {
