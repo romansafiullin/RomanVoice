@@ -861,7 +861,7 @@ def test_floating_failure_heartbeats_report_unavailable():
     assert "phase != RomanVoiceRecordingPhase.ERROR" in source
 
 
-def test_floating_service_retries_only_transient_idle_health_failures():
+def test_floating_service_retries_only_explicitly_transient_health_failures():
     source = (
         ANDROID_IME_ROOT
         / "app"
@@ -875,8 +875,13 @@ def test_floating_service_retries_only_transient_idle_health_failures():
     ).read_text(encoding="utf-8")
 
     assert "private volatile boolean retryableIdleHealthFailure;" in source
-    assert 'retryableIdleHealthFailure = "idle_health_failed".equals(event)' in source
+    assert 'boolean retryableIdleProbeFailure = "idle_health_failed".equals(event)' in source
     assert "&& retryableFailure;" in source
+    assert 'boolean retryableConnectionTimeout = "connection_timeout".equals(event);' in source
+    assert (
+        "retryableIdleHealthFailure = retryableIdleProbeFailure\n"
+        "                || retryableConnectionTimeout;"
+    ) in source
     assert (
         "phase == RomanVoiceRecordingPhase.ERROR\n"
         "                        && retryableIdleHealthFailure"

@@ -910,9 +910,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                 : message;
         failureReason = errorReason == null ? "" : errorReason;
         // Keep auth, configuration, stream, and device failures latched for explicit action.
-        // Only explicitly classified transient failures from the idle probe may retry themselves.
-        retryableIdleHealthFailure = "idle_health_failed".equals(event)
+        // A connection timeout may recover through the same authenticated, non-recording
+        // health probe used for explicitly transient idle-health failures.
+        boolean retryableIdleProbeFailure = "idle_health_failed".equals(event)
                 && retryableFailure;
+        boolean retryableConnectionTimeout = "connection_timeout".equals(event);
+        retryableIdleHealthFailure = retryableIdleProbeFailure
+                || retryableConnectionTimeout;
         boolean showFailure = !suppressRetryableNotice || !retryableIdleHealthFailure;
         boolean keepOverlayHidden = !showFailure
                 && (overlayView == null || overlayView.getVisibility() != View.VISIBLE);
