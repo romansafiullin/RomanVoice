@@ -887,15 +887,14 @@ def test_floating_service_retries_only_explicitly_transient_health_failures():
         "                        && retryableIdleHealthFailure"
     ) in source
     assert "retryIdleServiceHealth();" in source
-    assert "checkIdleServiceHealth(true);" in source
+    assert source.count("checkIdleServiceHealth();") >= 3
     assert (
         'handleStreamError(\n'
         '                            generation,\n'
         '                            finalFailure,\n'
         '                            "idle_health_failed",\n'
         '                            finalErrorReason,\n'
-        '                            finalRetryableFailure,\n'
-        '                            backgroundRetry'
+        '                            finalRetryableFailure'
     ) in source
 
 
@@ -949,7 +948,7 @@ def test_floating_and_tile_heartbeat_call_sites_report_service_liveness():
     assert '"floating_service_unavailable"' in tile
 
 
-def test_background_idle_health_retries_preserve_failure_ui_contract():
+def test_idle_health_failures_are_silent_while_active_failures_remain_visible():
     source = (
         ANDROID_IME_ROOT
         / "app"
@@ -962,12 +961,14 @@ def test_background_idle_health_retries_preserve_failure_ui_contract():
         / "RomanVoiceFloatingService.java"
     ).read_text(encoding="utf-8")
 
-    assert "boolean suppressRetryableNotice" in source
+    assert 'failPreflight("Use the Tailscale RomanVoice URL", "idle_stream_url_invalid", false, true);' in source
+    assert 'failPreflight("Set RomanVoice token", "idle_service_token_missing", false, true);' in source
     assert (
-        "boolean showFailure = !suppressRetryableNotice || !retryableIdleHealthFailure;"
+        'boolean silentIdleHealthFailure = "idle_health_failed".equals(event);'
         in source
     )
-    assert "boolean keepOverlayHidden = !showFailure" in source
+    assert "boolean showFailure = !silentIdleHealthFailure;" in source
     assert "if (showFailure)" in source
-    assert "overlayView.setVisibility(View.GONE);" in source
+    assert "showFailureNotice(failureNotice);" in source
+    assert source.count("hideIdleHealthOverlay();") >= 2
     assert source.count("retryableIdleHealthFailure = false;") >= 4

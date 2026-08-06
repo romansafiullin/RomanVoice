@@ -461,13 +461,26 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void failPreflight(String message, String event, boolean openSettingsPage) {
+        failPreflight(message, event, openSettingsPage, false);
+    }
+
+    private void failPreflight(
+            String message,
+            String event,
+            boolean openSettingsPage,
+            boolean silentOnPhoneUi
+    ) {
         invalidateSession(RomanVoiceRecordingPhase.ERROR);
         retryableIdleHealthFailure = false;
         retryFailureNotice = "";
         failureReason = event;
         failureNotice = message;
         setRecordingControls(false);
-        showFailureNotice(message);
+        if (silentOnPhoneUi) {
+            hideIdleHealthOverlay();
+        } else {
+            showFailureNotice(message);
+        }
         notifyTileStateChanged();
         reportPhoneHeartbeat(event, false);
         if (openSettingsPage) {
@@ -476,29 +489,17 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void checkIdleServiceHealth() {
-        checkIdleServiceHealth(false);
-    }
-
-    private void retryIdleServiceHealth() {
-        if (phase != RomanVoiceRecordingPhase.ERROR || !retryableIdleHealthFailure) {
-            return;
-        }
-        invalidateSession(RomanVoiceRecordingPhase.IDLE);
-        checkIdleServiceHealth(true);
-    }
-
-    private void checkIdleServiceHealth(boolean backgroundRetry) {
         if (phase != RomanVoiceRecordingPhase.IDLE) {
             return;
         }
         String streamUrl = RomanVoicePreferences.streamUrl(this);
         String token = RomanVoicePreferences.token(this);
         if (!RomanVoicePreferences.isApprovedStreamUrl(this, streamUrl)) {
-            failPreflight("Use the Tailscale RomanVoice URL", "idle_stream_url_invalid", false);
+            failPreflight("Use the Tailscale RomanVoice URL", "idle_stream_url_invalid", false, true);
             return;
         }
         if (token == null || token.trim().isEmpty()) {
-            failPreflight("Set RomanVoice token", "idle_service_token_missing", false);
+            failPreflight("Set RomanVoice token", "idle_service_token_missing", false, true);
             return;
         }
 
@@ -581,12 +582,19 @@ public class RomanVoiceFloatingService extends AccessibilityService {
                             finalFailure,
                             "idle_health_failed",
                             finalErrorReason,
-                            finalRetryableFailure,
-                            backgroundRetry
+                            finalRetryableFailure
                     );
                 }
             });
         }, "RomanVoiceFloatHealth").start();
+    }
+
+    private void retryIdleServiceHealth() {
+        if (phase != RomanVoiceRecordingPhase.ERROR || !retryableIdleHealthFailure) {
+            return;
+        }
+        invalidateSession(RomanVoiceRecordingPhase.IDLE);
+        checkIdleServiceHealth();
     }
 
     private static boolean isRetryableIdleHealthHttpCode(int code) {
@@ -886,7 +894,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
     }
 
     private void handleStreamError(int generation, String message, String event) {
-        handleStreamError(generation, message, event, event, false, false);
+        handleStreamError(generation, message, event, event, false);
     }
 
     private void handleStreamError(
@@ -894,8 +902,7 @@ public class RomanVoiceFloatingService extends AccessibilityService {
             String message,
             String event,
             String errorReason,
-            boolean retryableFailure,
-            boolean suppressRetryableNotice
+            boolean retryableFailure
     ) {
         if (!completeSession(generation, RomanVoiceRecordingPhase.ERROR)) {
             return;
@@ -917,14 +924,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         boolean retryableConnectionTimeout = "connection_timeout".equals(event);
         retryableIdleHealthFailure = retryableIdleProbeFailure
                 || retryableConnectionTimeout;
-        boolean showFailure = !suppressRetryableNotice || !retryableIdleHealthFailure;
-        boolean keepOverlayHidden = !showFailure
-                && (overlayView == null || overlayView.getVisibility() != View.VISIBLE);
+        boolean silentIdleHealthFailure = "idle_health_failed".equals(event);
+        boolean showFailure = !silentIdleHealthFailure;
         setRecordingControls(false);
         if (showFailure) {
             showFailureNotice(failureNotice);
-        } else if (keepOverlayHidden && overlayView != null) {
-            overlayView.setVisibility(View.GONE);
+        } else {
+            hideIdleHealthOverlay();
         }
         resetLiveDictationState();
         notifyTileStateChanged();
@@ -1310,6 +1316,13 @@ public class RomanVoiceFloatingService extends AccessibilityService {
         }
         overlayView.setVisibility(View.VISIBLE);
         scheduleIdleOverlayHide(IDLE_NOTICE_VISIBLE_MS);
+    }
+
+    private void hideIdleHealthOverlay() {
+        cancelIdleOverlayHide();
+        if (overlayView != null) {
+            overlayView.setVisibility(View.GONE);
+        }
     }
 
     private void setRecordingControls(boolean isRecording) {
