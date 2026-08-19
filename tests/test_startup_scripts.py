@@ -107,6 +107,8 @@ def test_watchdog_installer_uses_transactional_hidden_scheduled_tasks_by_default
     assert "task:Principals/task:Principal/task:LogonType" in script
     assert "Test-InteractiveCurrentUserPrincipal" in script
     assert "Restore-ManagedTaskSnapshots" in script
+    assert "Invoke-Schtasks" in script
+    assert "& schtasks.exe" not in script
     assert "[ok] Rolled back partial scheduled task" in script
     assert "$attemptedTaskNames.Add($startupTaskName)" in script
     assert "$attemptedTaskNames.Add($watchdogTaskName)" in script
@@ -147,6 +149,135 @@ $servicePrincipal = [pscustomobject]@{{
 }}
 if (Test-InteractiveCurrentUserPrincipal -Principal $servicePrincipal -ExpectedSid $currentSid) {{
     throw 'Service principal was accepted.'
+}}
+"""
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_watchdog_schtasks_boundary_handles_native_stderr_in_windows_powershell():
+    installer = PROJECT_ROOT / "scripts" / "install-background-watchdog.ps1"
+    source = str(installer).replace("'", "''")
+    harness = f"""
+$ErrorActionPreference = 'Stop'
+$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('romanvoice-schtasks-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
+try {{
+    $fakeSchtasks = Join-Path $temporaryDirectory 'schtasks.exe'
+    $fakeSource = @'
+using System;
+public static class FakeSchtasks {{
+    public static void Main() {{
+        string result = Environment.GetEnvironmentVariable("ROMANVOICE_FAKE_SCHTASKS_RESULT");
+        if (result == "success") {{
+            Console.Out.WriteLine("<Task>test</Task>");
+            return;
+        }}
+        if (result == "denied") {{
+            Console.Error.WriteLine("ERROR: Access is denied.");
+            Environment.Exit(1);
+        }}
+        Console.Error.WriteLine("ERROR: The system cannot find the file specified.");
+        Environment.Exit(1);
+    }}
+}}
+'@
+    Add-Type -TypeDefinition $fakeSource -OutputAssembly $fakeSchtasks -OutputType ConsoleApplication
+    $env:PATH = $temporaryDirectory + [IO.Path]::PathSeparator + $env:PATH
+
+    $installer = Get-Content -Raw -LiteralPath '{source}'
+    $definitionStart = $installer.IndexOf('function Invoke-Schtasks')
+    $definitionEnd = $installer.IndexOf('# Install entry point')
+    $definitions = $installer.Substring($definitionStart, $definitionEnd - $definitionStart)
+    Invoke-Expression $definitions
+    $managedTaskNames = @('RomanVoice test startup', 'RomanVoice test watchdog')
+
+    $env:ROMANVOICE_FAKE_SCHTASKS_RESULT = 'missing'
+    if ($null -ne (Get-ManagedTaskXml -TaskName 'Absent task')) {{
+        throw 'A missing scheduled task did not return null.'
+    }}
+    if (Remove-ManagedScheduledTask -TaskName 'Absent task') {{
+        throw 'Removing a missing scheduled task did not return the no-op result.'
+    }}
+    $missingSnapshots = Save-ManagedTaskSnapshots
+    foreach ($taskName in $managedTaskNames) {{
+        if ($null -ne $missingSnapshots[$taskName]) {{
+            throw 'Snapshotting a missing scheduled task did not preserve absence.'
+        }}
+    }}
+    Restore-ManagedTaskSnapshots `
+        -Snapshots $missingSnapshots `
+        -AttemptedTaskNames $managedTaskNames | Out-Null
+    Remove-ManagedScheduledTasks | Out-Null
+
+    $env:ROMANVOICE_FAKE_SCHTASKS_RESULT = 'denied'
+    $queryFailedClosed = $false
+    try {{
+        Get-ManagedTaskXml -TaskName 'Protected task' | Out-Null
+    }} catch {{
+        $queryFailedClosed = $_.Exception.Message -match 'Access is denied'
+    }}
+    if (-not $queryFailedClosed) {{
+        throw 'A real scheduled-task query failure did not fail closed.'
+    }}
+    $deleteFailedClosed = $false
+    try {{
+        Remove-ManagedScheduledTask -TaskName 'Protected task' | Out-Null
+    }} catch {{
+        $deleteFailedClosed = $_.Exception.Message -match 'Access is denied'
+    }}
+    if (-not $deleteFailedClosed) {{
+        throw 'A real scheduled-task delete failure did not fail closed.'
+    }}
+    $snapshotFailedClosed = $false
+    try {{
+        Save-ManagedTaskSnapshots | Out-Null
+    }} catch {{
+        $snapshotFailedClosed = $_.Exception.Message -match 'Access is denied'
+    }}
+    if (-not $snapshotFailedClosed) {{
+        throw 'A real scheduled-task snapshot failure did not fail closed.'
+    }}
+    $fallbackDeleteFailedClosed = $false
+    try {{
+        Remove-ManagedScheduledTasks | Out-Null
+    }} catch {{
+        $fallbackDeleteFailedClosed = $_.Exception.Message -match 'Access is denied'
+    }}
+    if (-not $fallbackDeleteFailedClosed) {{
+        throw 'Fallback-mode task deletion did not fail closed.'
+    }}
+
+    $restoreSnapshots = @{{
+        $managedTaskNames[0] = '<Task>prior</Task>'
+        $managedTaskNames[1] = $null
+    }}
+    $restoreOutput = @(
+        Restore-ManagedTaskSnapshots `
+            -Snapshots $restoreSnapshots `
+            -AttemptedTaskNames $managedTaskNames *>&1
+    ) -join [Environment]::NewLine
+    if ($restoreOutput -notmatch 'Could not restore the prior task definition') {{
+        throw 'A real scheduled-task restore failure was not reported as a warning.'
+    }}
+    if ($restoreOutput -notmatch 'Could not remove partial scheduled task') {{
+        throw 'A real rollback-delete failure was not reported as a warning.'
+    }}
+
+    $env:ROMANVOICE_FAKE_SCHTASKS_RESULT = 'success'
+    if ((Get-ManagedTaskXml -TaskName 'Existing task') -notmatch '<Task>test</Task>') {{
+        throw 'A successful scheduled-task XML query lost its native output.'
+    }}
+}} finally {{
+    Remove-Item Env:ROMANVOICE_FAKE_SCHTASKS_RESULT -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }}
 """
     result = subprocess.run(

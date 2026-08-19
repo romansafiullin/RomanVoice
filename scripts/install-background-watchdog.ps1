@@ -27,14 +27,72 @@ if (-not (Test-Path -LiteralPath $watchScript)) {
     throw "Missing resident watchdog script: $watchScript"
 }
 
+function Invoke-Schtasks {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $schtasks = Get-Command -Name 'schtasks.exe' -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 promotes native stderr to NativeCommandError
+        # under Stop. Capture it here so callers can classify the exit result.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $schtasks.Source @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output = @($output | ForEach-Object { [string]$_ })
+    }
+}
+
+function Test-SchtasksTaskMissing {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if ($Result.ExitCode -eq 0) {
+        return $false
+    }
+    $message = $Result.Output -join [Environment]::NewLine
+    return $message -match '(?i)ERROR:\s+(The system cannot find the file specified|The specified task name does not exist)\.?'
+}
+
+function Format-SchtasksFailure {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $detail = ($Result.Output -join [Environment]::NewLine).Trim()
+    if (-not $detail) {
+        $detail = 'No error detail was returned.'
+    }
+    return "schtasks.exe exited with code $($Result.ExitCode): $detail"
+}
+
 function Get-ManagedTaskXml {
     param([Parameter(Mandatory = $true)][string]$TaskName)
 
-    $output = & schtasks.exe /Query /TN $TaskName /XML 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $result = Invoke-Schtasks -Arguments @('/Query', '/TN', $TaskName, '/XML')
+    if ($result.ExitCode -eq 0) {
+        return ($result.Output -join [Environment]::NewLine)
+    }
+    if (Test-SchtasksTaskMissing -Result $result) {
         return $null
     }
-    return ($output -join [Environment]::NewLine)
+    throw "Could not query scheduled task XML for '$TaskName'. $(Format-SchtasksFailure -Result $result)"
+}
+
+function Remove-ManagedScheduledTask {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    $result = Invoke-Schtasks -Arguments @('/Delete', '/TN', $TaskName, '/F')
+    if ($result.ExitCode -eq 0) {
+        return $true
+    }
+    if (Test-SchtasksTaskMissing -Result $result) {
+        return $false
+    }
+    throw "Could not remove scheduled task '$TaskName'. $(Format-SchtasksFailure -Result $result)"
 }
 
 function Save-ManagedTaskSnapshots {
@@ -57,19 +115,22 @@ function Restore-ManagedTaskSnapshots {
             $temporaryXml = [IO.Path]::GetTempFileName()
             try {
                 [IO.File]::WriteAllText($temporaryXml, $snapshot, [Text.Encoding]::Unicode)
-                & schtasks.exe /Create /TN $taskName /XML $temporaryXml /F | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "[warn] Could not restore the prior task definition: $taskName"
+                $restoreResult = Invoke-Schtasks -Arguments @('/Create', '/TN', $taskName, '/XML', $temporaryXml, '/F')
+                if ($restoreResult.ExitCode -ne 0) {
+                    Write-Host "[warn] Could not restore the prior task definition: $taskName. $(Format-SchtasksFailure -Result $restoreResult)"
                 }
             } finally {
                 Remove-Item -LiteralPath $temporaryXml -Force -ErrorAction SilentlyContinue
             }
         } elseif ($AttemptedTaskNames -contains $taskName) {
-            & schtasks.exe /Delete /TN $taskName /F | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "[ok] Rolled back partial scheduled task: $taskName"
-            } else {
-                Write-Host "[warn] Could not remove partial scheduled task: $taskName"
+            try {
+                if (Remove-ManagedScheduledTask -TaskName $taskName) {
+                    Write-Host "[ok] Rolled back partial scheduled task: $taskName"
+                } else {
+                    Write-Host "[ok] Partial scheduled task was already absent: $taskName"
+                }
+            } catch {
+                Write-Host "[warn] Could not remove partial scheduled task: $taskName. $($_.Exception.Message)"
             }
         }
     }
@@ -254,11 +315,11 @@ function Establish-StartupResidentFallback {
 
 function Remove-ManagedScheduledTasks {
     foreach ($taskName in $managedTaskNames) {
-        & schtasks.exe /Delete /TN $taskName /F | Out-Null
-        if ($LASTEXITCODE -ne 0 -and (Get-ManagedTaskXml -TaskName $taskName)) {
-            throw "Could not remove scheduled task after StartupResident fallback was verified: $taskName"
+        if (Remove-ManagedScheduledTask -TaskName $taskName) {
+            Write-Host "[ok] Removed scheduled task: $taskName"
+        } else {
+            Write-Host "[ok] Scheduled task was already absent: $taskName"
         }
-        Write-Host "[ok] Removed scheduled task: $taskName"
     }
 }
 
