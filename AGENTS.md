@@ -60,11 +60,15 @@ product or architecture direction.
   status/cancel affordance.
 - The known preferred microphone path is the WASAPI default resolving to
   `Microphone (3- Razer Kiyo)` when that device is present.
-- The currently working startup fallback is the Startup-folder VBS watchdog:
+- The preferred watchdog is two hidden, current-user Scheduled Tasks: a logon
+  one-shot and a one-minute one-shot, both calling
+  `scripts\ensure-romanvoice-running.ps1`. The tray/background app remains the
+  only RomanVoice runtime owner.
+- The Startup-folder VBS resident watchdog remains the degraded fallback:
   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\RomanVoice Background Watchdog.vbs`
-  running `scripts\watch-romanvoice-background.ps1`.
-- Task Scheduler registration may fail with `Access denied`; that is not a
-  blocker if the Startup-folder watchdog is installed and verified.
+  running `scripts\watch-romanvoice-background.ps1`. Task Scheduler registration
+  may fail with `Access denied`; preserve or restore this verified fallback in
+  that case rather than leaving no supervisor.
 
 ## Product Behavior To Preserve
 
@@ -139,7 +143,9 @@ For startup/background work, verify all of the following:
 - The app starts hidden and logs `Main window hidden on startup; running from tray`.
 - `Ctrl+Space` is registered by the Win32 hotkey backend.
 - The watchdog log sees the current RomanVoice pid.
-- The Startup-folder VBS still points at this checkout if the repo was not moved.
+- In Scheduled mode, both tasks are enabled, hidden, current-user tasks with the
+  expected logon and one-minute triggers. In StartupResident fallback mode, the
+  Startup-folder VBS still points at this checkout if the repo was not moved.
 
 Check logs directly:
 

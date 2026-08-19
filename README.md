@@ -33,9 +33,23 @@ background watchdog:
 scripts\install-background-watchdog.ps1
 ```
 
-This tries to create reversible scheduled tasks. If Task Scheduler registration
-is blocked by Windows policy, it falls back to a Startup-folder watchdog script
-that runs hidden and checks once per minute. Remove either setup with:
+This installs two hidden, current-user Scheduled Tasks: an immediate logon
+check and a one-shot health/start check every minute. Both run the same
+duplicate-safe `ensure-romanvoice-running.ps1` action, while the tray app
+remains the only RomanVoice runtime owner. The installer validates the task
+action, principal, cadence, enabled state, and hidden setting before retiring
+the previous Startup-folder resident watchdog.
+
+If Task Scheduler registration or validation is blocked by Windows policy, the
+installer preserves or restores the hidden Startup-folder resident watchdog and
+reports that degraded fallback. To explicitly return to that verified fallback,
+run:
+
+```powershell
+scripts\install-background-watchdog.ps1 -Mode StartupResident
+```
+
+Remove either setup with:
 
 ```powershell
 scripts\remove-background-watchdog.ps1

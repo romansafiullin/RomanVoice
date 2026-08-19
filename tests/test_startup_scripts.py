@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +78,89 @@ def test_path_installer_checks_the_supported_uv_environment():
     assert "python -m venv venv" not in script
 
 
-def test_watchdog_installer_quotes_resident_script_path():
+def test_watchdog_installer_uses_transactional_hidden_scheduled_tasks_by_default():
+    script = (PROJECT_ROOT / "scripts" / "install-background-watchdog.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[string]$Mode = 'Scheduled'" in script
+    assert "[ValidateSet('Scheduled', 'StartupResident')]" in script
+    assert "$startupTaskName = 'RomanVoice Background Startup'" in script
+    assert "$watchdogTaskName = 'RomanVoice Background Watchdog'" in script
+    assert "New-ScheduledTaskAction" in script
+    assert "New-ScheduledTaskPrincipal" in script
+    assert "-LogonType Interactive" in script
+    assert "-RunLevel Limited" in script
+    assert "New-ScheduledTaskSettingsSet" in script
+    assert "-MultipleInstances IgnoreNew" in script
+    assert "Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force" in script
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $currentUser" in script
+    assert "New-ScheduledTaskTrigger -Daily -At $triggerAt" in script
+    assert "-RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)" in script
+    assert "-RepetitionDuration (New-TimeSpan -Days 1)" in script
+    assert "-NoLogo -NoProfile -NonInteractive" in script
+    assert "-WindowStyle Hidden" in script
+    assert "Assert-RomanVoiceTask" in script
+    assert "task:Settings/task:Hidden" in script
+    assert '"PT$($IntervalMinutes)M"' in script
+    assert "task:Principals/task:Principal/task:UserId" in script
+    assert "task:Principals/task:Principal/task:LogonType" in script
+    assert "Test-InteractiveCurrentUserPrincipal" in script
+    assert "Restore-ManagedTaskSnapshots" in script
+    assert "[ok] Rolled back partial scheduled task" in script
+    assert "$attemptedTaskNames.Add($startupTaskName)" in script
+    assert "$attemptedTaskNames.Add($watchdogTaskName)" in script
+    assert "Establish-StartupResidentFallback" in script
+    assert "Retire-StartupResidentFallback" in script
+
+
+def test_watchdog_principal_validation_accepts_native_current_user_representation():
+    installer = PROJECT_ROOT / "scripts" / "install-background-watchdog.ps1"
+    source = str(installer).replace("'", "''")
+    harness = f"""
+$installer = Get-Content -Raw -LiteralPath '{source}'
+$definitionStart = $installer.IndexOf('function Resolve-AccountSid')
+$definitionEnd = $installer.IndexOf('# Install entry point')
+$definitions = $installer.Substring($definitionStart, $definitionEnd - $definitionStart)
+Invoke-Expression $definitions
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$nativeCurrentUser = [pscustomobject]@{{
+    UserId = $env:USERNAME
+    LogonType = 'Interactive'
+    RunLevel = 'Limited'
+}}
+if (-not (Test-InteractiveCurrentUserPrincipal -Principal $nativeCurrentUser -ExpectedSid $currentSid)) {{
+    throw 'The native ScheduledTasks current-user representation was rejected.'
+}}
+$passwordPrincipal = [pscustomobject]@{{
+    UserId = $env:USERNAME
+    LogonType = 'Password'
+    RunLevel = 'Limited'
+}}
+if (Test-InteractiveCurrentUserPrincipal -Principal $passwordPrincipal -ExpectedSid $currentSid) {{
+    throw 'Password logon was accepted.'
+}}
+$servicePrincipal = [pscustomobject]@{{
+    UserId = 'SYSTEM'
+    LogonType = 'ServiceAccount'
+    RunLevel = 'Limited'
+}}
+if (Test-InteractiveCurrentUserPrincipal -Principal $servicePrincipal -ExpectedSid $currentSid) {{
+    throw 'Service principal was accepted.'
+}}
+"""
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_watchdog_installer_keeps_the_resident_fallback_hidden_and_safe_to_restore():
     script = (PROJECT_ROOT / "scripts" / "install-background-watchdog.ps1").read_text(
         encoding="utf-8"
     )
@@ -86,6 +169,11 @@ def test_watchdog_installer_quotes_resident_script_path():
     assert '-File "' in script
     assert '" -IntervalSeconds 60' in script
     assert "-ArgumentList $watchArgs" in script
+    assert "Start-ResidentWatchdog" in script
+    assert "Remove-ManagedScheduledTasks" in script
+    assert "Establish-StartupResidentFallback\n    Remove-ManagedScheduledTasks" in script
+    assert "IndexOf($watchScript, [StringComparison]::OrdinalIgnoreCase)" in script
+    assert "start_whisper_watcher.vbs" not in script
 
 
 def test_resident_watchdog_has_single_instance_and_rotating_logs():
